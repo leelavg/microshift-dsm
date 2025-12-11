@@ -51,5 +51,10 @@ func StartComponents(cfg *config.Config, ctx context.Context) error {
 		}
 	}
 
+	if err := deployKubeVip(ctx, cfg, kubeAdminConfig); err != nil {
+		klog.Warningf("Failed to deploy kube-vip: %v", err)
+		return err
+	}
+
 	return nil
 }

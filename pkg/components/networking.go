@@ -51,9 +51,19 @@ func startCNIPlugin(ctx context.Context, cfg *config.Config, kubeconfigPath stri
 	)
 
 	if cfg.MultiNode.Enabled {
-		apps = []string{
-			"components/ovn/multi-node/master/daemonset.yaml",
-			"components/ovn/multi-node/node/daemonset.yaml",
+		// In multinode, only deploy ovnkube-master on control plane nodes
+		// Worker-only nodes should only get ovnkube-node for networking
+		if cfg.MultiNode.WorkerOnly {
+			// Worker-only: skip ovnkube-master, only deploy ovnkube-node
+			apps = []string{
+				"components/ovn/multi-node/node/daemonset.yaml",
+			}
+		} else {
+			// Control plane: deploy both ovnkube-master and ovnkube-node
+			apps = []string{
+				"components/ovn/multi-node/master/daemonset.yaml",
+				"components/ovn/multi-node/node/daemonset.yaml",
+			}
 		}
 	}
 
@@ -101,14 +111,26 @@ func startCNIPlugin(ctx context.Context, cfg *config.Config, kubeconfigPath stri
 	}
 
 	// Multinode only params: OVN_NB_DB_LIST, OVN_SB_DB_LIST, OVN_NB_PORT, OVN_SB_PORT
+	// Build comma-separated OVN DB lists for HA control planes
+	// Use static control plane list from config (populated from .cluster-config file)
+	controlPlanes := strings.Split(cfg.MultiNode.Controlplane, ",")
+	nbList := make([]string, 0, len(controlPlanes))
+	sbList := make([]string, 0, len(controlPlanes))
+	for _, cp := range controlPlanes {
+		cp = strings.TrimSpace(cp)
+		nbList = append(nbList, fmt.Sprintf("tcp:%s:%s", cp, ovn.OVN_NB_PORT))
+		sbList = append(sbList, fmt.Sprintf("tcp:%s:%s", cp, ovn.OVN_SB_PORT))
+	}
 	extraParams := assets.RenderParams{
 		"OVNConfig":      ovnConfig,
 		"KubeconfigPath": kubeconfigPath,
 		"KubeconfigDir":  filepath.Join(config.DataDir, "/resources/kubeadmin"),
-		"OVN_NB_DB_LIST": fmt.Sprintf("tcp:%s:%s", cfg.MultiNode.Controlplane, ovn.OVN_NB_PORT),
-		"OVN_SB_DB_LIST": fmt.Sprintf("tcp:%s:%s", cfg.MultiNode.Controlplane, ovn.OVN_SB_PORT),
+		"OVN_NB_DB_LIST": strings.Join(nbList, ","),
+		"OVN_SB_DB_LIST": strings.Join(sbList, ","),
 		"OVN_NB_PORT":    ovn.OVN_NB_PORT,
 		"OVN_SB_PORT":    ovn.OVN_SB_PORT,
+		"OVN_NB_RAFT_PORT": ovn.OVN_NB_RAFT_PORT,
+		"OVN_SB_RAFT_PORT": ovn.OVN_SB_RAFT_PORT,
 	}
 	if err := assets.ApplyConfigMaps(ctx, cm, renderTemplate, renderParamsFromConfig(cfg, extraParams), kubeconfigPath); err != nil {
 		klog.Warningf("Failed to apply configMap %v %v", cm, err)

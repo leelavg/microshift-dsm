@@ -40,6 +40,105 @@ spec:
       # /var/lib/openvswitch -> /var/lib/ovn/data - ovsdb pki state
       # /run/openvswitch -> tmpfs - sockets
       # /env -> configmap env-overrides - debug overrides
+      initContainers:
+      # ovn-state-detector: validate cluster state before starting OVN databases
+      # Prevents split-brain by refusing to bootstrap if joining node can't reach existing cluster
+      - name: ovn-state-detector
+        image: {{ .ReleaseImage.ovn_kubernetes_microshift }}
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -xeo pipefail
+
+          NB_DB_FILE="/etc/ovn/ovnnb_db.db"
+          SB_DB_FILE="/etc/ovn/ovnsb_db.db"
+          OVN_CONFIG="/etc/microshift-ovn/config"
+
+          echo "$(date -Iseconds) - OVN State Detector: Starting cluster state analysis"
+
+          # STATE 1: RESUME MODE - Database files exist
+          # This means we're restarting an existing node, read cluster ID offline
+          if [[ -f "${NB_DB_FILE}" ]] || [[ -f "${SB_DB_FILE}" ]]; then
+            echo "$(date -Iseconds) - RESUME MODE: Database files exist, cluster already formed"
+
+            if [[ -f "${NB_DB_FILE}" ]]; then
+              NB_CID=$(ovsdb-tool db-cid "${NB_DB_FILE}" 2>/dev/null || echo "unknown")
+              echo "$(date -Iseconds) - NB Database: cluster_id=${NB_CID}"
+            fi
+
+            if [[ -f "${SB_DB_FILE}" ]]; then
+              SB_CID=$(ovsdb-tool db-cid "${SB_DB_FILE}" 2>/dev/null || echo "unknown")
+              echo "$(date -Iseconds) - SB Database: cluster_id=${SB_CID}"
+            fi
+
+            echo "$(date -Iseconds) - State detection complete: RESUME with existing cluster"
+            exit 0
+          fi
+
+          # STATE 2: BOOTSTRAP MODE - No DB files, no config
+          # This is the first control plane node ever
+          if [[ ! -f "${OVN_CONFIG}" ]]; then
+            echo "$(date -Iseconds) - BOOTSTRAP MODE: No config file, no DB files"
+            echo "$(date -Iseconds) - This appears to be the first control plane node"
+            echo "$(date -Iseconds) - State detection complete: BOOTSTRAP new cluster"
+            exit 0
+          fi
+
+          # STATE 3: JOIN MODE - No DB files, config exists
+          # Verify bootstrap node is reachable before allowing join
+          source "${OVN_CONFIG}"
+          echo "$(date -Iseconds) - JOIN MODE: Config present, bootstrap node is ${OVN_BOOTSTRAP_NODE}"
+
+          # Check reachability of bootstrap node RAFT ports
+          check_reachable() {
+            local ip=$1
+            local port=$2
+            local max_retries=30
+
+            echo "$(date -Iseconds) - Verifying bootstrap node ${ip}:${port} is reachable..."
+
+            for ((i=0; i<max_retries; i++)); do
+              if timeout 2 bash -c "echo > /dev/tcp/${ip}/${port}" 2>/dev/null; then
+                echo "$(date -Iseconds) - Bootstrap node ${ip}:${port} is REACHABLE"
+                return 0
+              fi
+              sleep 2
+            done
+
+            echo "$(date -Iseconds) - Bootstrap node ${ip}:${port} is UNREACHABLE after ${max_retries} attempts"
+            return 1
+          }
+
+          # Verify both NB and SB RAFT ports are reachable
+          if check_reachable "${OVN_BOOTSTRAP_NODE}" "{{.OVN_NB_RAFT_PORT}}" && \
+             check_reachable "${OVN_BOOTSTRAP_NODE}" "{{.OVN_SB_RAFT_PORT}}"; then
+            echo "$(date -Iseconds) - Bootstrap node is reachable, proceeding with join"
+            echo "$(date -Iseconds) - State detection complete: JOIN existing cluster"
+            exit 0
+          fi
+
+          # Bootstrap unreachable - REFUSE to create new cluster (would cause split-brain)
+          echo "$(date -Iseconds) - ERROR: Cannot reach bootstrap node to join cluster"
+          echo "$(date -Iseconds) - REFUSING to create new cluster - would cause split-brain!"
+          echo "$(date -Iseconds) - Pod will restart and retry. Check bootstrap node connectivity."
+          exit 1
+        env:
+        - name: K8S_NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        volumeMounts:
+        - mountPath: /etc/ovn/
+          name: etc-ovn
+        - mountPath: /etc/microshift-ovn
+          name: ovn-cluster-config
+          readOnly: true
+        resources:
+          requests:
+            cpu: 10m
+            memory: 10Mi
+        terminationMessagePolicy: FallbackToLogsOnError
       containers:
       # ovn-northd: convert network objects in nbdb to flows in sbdb
       - name: northd
@@ -94,6 +193,9 @@ spec:
           name: run-ovn
         - mountPath: /env
           name: env-overrides
+        - mountPath: /etc/microshift-ovn
+          name: ovn-cluster-config
+          readOnly: true
         resources:
           requests:
             cpu: 10m
@@ -136,10 +238,46 @@ spec:
           db="nb"
           ovn_db_file="/etc/ovn/ovn${db}_db.db"
 
-          OVN_ARGS="--db-nb-cluster-local-port=9643 \
-            --db-nb-cluster-local-addr=$(bracketify ${K8S_NODE_IP}) \
-            --db-nb-cluster-local-proto=tcp \
-            --no-monitor"
+          # Check if OVN cluster config exists (written by microshift add-node)
+          if [[ -f /etc/microshift-ovn/config ]]; then
+            source /etc/microshift-ovn/config
+            # OVN_BOOTSTRAP_NODE now contains first CP IP
+
+            if [[ "${K8S_NODE_IP}" == "${OVN_BOOTSTRAP_NODE}" ]]; then
+              # This is bootstrap node, but cluster already exists (file present)
+              # Just start normally without create or join flags
+              echo "$(date -Iseconds) - Bootstrap node, cluster exists, starting normally"
+              OVN_ARGS="--db-nb-cluster-local-port={{.OVN_NB_RAFT_PORT}} \
+                --db-nb-cluster-local-addr=$(bracketify ${K8S_NODE_IP}) \
+                --db-nb-cluster-local-proto=tcp \
+                --no-monitor"
+            else
+              # Join existing cluster
+              echo "$(date -Iseconds) - Join mode: Joining OVN NB cluster at ${OVN_BOOTSTRAP_NODE}"
+              OVN_ARGS="--db-nb-cluster-local-port={{.OVN_NB_RAFT_PORT}} \
+                --db-nb-cluster-local-addr=$(bracketify ${K8S_NODE_IP}) \
+                --db-nb-cluster-local-proto=tcp \
+                --db-nb-cluster-remote-addr=$(bracketify ${OVN_BOOTSTRAP_NODE}) \
+                --db-nb-cluster-remote-port={{.OVN_NB_RAFT_PORT}} \
+                --db-nb-cluster-remote-proto=tcp \
+                --no-monitor"
+            fi
+          elif [[ -f ${ovn_db_file} ]]; then
+            # DB exists but no config = bootstrap node after cluster formed
+            echo "$(date -Iseconds) - Cluster DB exists, starting without bootstrap"
+            OVN_ARGS="--db-nb-cluster-local-port={{.OVN_NB_RAFT_PORT}} \
+              --db-nb-cluster-local-addr=$(bracketify ${K8S_NODE_IP}) \
+              --db-nb-cluster-local-proto=tcp \
+              --no-monitor"
+          else
+            # No config file and no DB = first node ever, bootstrap new cluster
+            echo "$(date -Iseconds) - Bootstrap mode: Creating new OVN NB cluster"
+            OVN_ARGS="--db-nb-cluster-local-port={{.OVN_NB_RAFT_PORT}} \
+              --db-nb-cluster-local-addr=$(bracketify ${K8S_NODE_IP}) \
+              --db-nb-cluster-local-proto=tcp \
+              --db-nb-create-insecure-remote=yes \
+              --no-monitor"
+          fi
 
           echo "$(date -Iseconds) - starting nbdb"
 
@@ -163,6 +301,19 @@ spec:
                 set -x
                 rm -f /var/run/ovn/ovnnb_db.pid
 
+                # Wait for local database to be ready before setting connection
+                # Init container already validated cluster state, so we just wait for DB to start
+                retries=0
+                while [[ "${retries}" -lt 30 ]]; do
+                  if ovn-nbctl --no-leader-only -t 1 list connection &>/dev/null 2>&1; then
+                    echo "$(date -Iseconds) - Local NB database is ready"
+                    break
+                  fi
+                  sleep 1
+                  (( retries += 1 ))
+                done
+
+                # Now set connection
                 retries=0
                 while [[ "${retries}" -lt 60 ]]; do
                   ovn-nbctl --no-leader-only -t 5 set-connection ptcp:{{.OVN_NB_PORT}} -- set connection . inactivity_probe=60000
@@ -232,8 +383,13 @@ spec:
           name: run-openvswitch
         - mountPath: /run/ovn/
           name: run-ovn
+        - mountPath: /etc/ovn
+          name: etc-ovn
         - mountPath: /env
           name: env-overrides
+        - mountPath: /etc/microshift-ovn
+          name: ovn-cluster-config
+          readOnly: true
         resources:
           requests:
             cpu: 10m
@@ -281,10 +437,46 @@ spec:
           db="sb"
           ovn_db_file="/etc/ovn/ovn${db}_db.db"
 
-          OVN_ARGS="--db-sb-cluster-local-port=9644 \
-            --db-sb-cluster-local-addr=$(bracketify ${K8S_NODE_IP}) \
-            --db-sb-cluster-local-proto=tcp \
-            --no-monitor"
+          # Check if OVN cluster config exists (written by microshift add-node)
+          if [[ -f /etc/microshift-ovn/config ]]; then
+            source /etc/microshift-ovn/config
+            # OVN_BOOTSTRAP_NODE now contains first CP IP
+
+            if [[ "${K8S_NODE_IP}" == "${OVN_BOOTSTRAP_NODE}" ]]; then
+              # This is bootstrap node, but cluster already exists (file present)
+              # Just start normally without create or join flags
+              echo "$(date -Iseconds) - Bootstrap node, cluster exists, starting normally"
+              OVN_ARGS="--db-sb-cluster-local-port={{.OVN_SB_RAFT_PORT}} \
+                --db-sb-cluster-local-addr=$(bracketify ${K8S_NODE_IP}) \
+                --db-sb-cluster-local-proto=tcp \
+                --no-monitor"
+            else
+              # Join existing cluster
+              echo "$(date -Iseconds) - Join mode: Joining OVN SB cluster at ${OVN_BOOTSTRAP_NODE}"
+              OVN_ARGS="--db-sb-cluster-local-port={{.OVN_SB_RAFT_PORT}} \
+                --db-sb-cluster-local-addr=$(bracketify ${K8S_NODE_IP}) \
+                --db-sb-cluster-local-proto=tcp \
+                --db-sb-cluster-remote-addr=$(bracketify ${OVN_BOOTSTRAP_NODE}) \
+                --db-sb-cluster-remote-port={{.OVN_SB_RAFT_PORT}} \
+                --db-sb-cluster-remote-proto=tcp \
+                --no-monitor"
+            fi
+          elif [[ -f ${ovn_db_file} ]]; then
+            # DB exists but no config = bootstrap node after cluster formed
+            echo "$(date -Iseconds) - Cluster DB exists, starting without bootstrap"
+            OVN_ARGS="--db-sb-cluster-local-port={{.OVN_SB_RAFT_PORT}} \
+              --db-sb-cluster-local-addr=$(bracketify ${K8S_NODE_IP}) \
+              --db-sb-cluster-local-proto=tcp \
+              --no-monitor"
+          else
+            # No config file and no DB = first node ever, bootstrap new cluster
+            echo "$(date -Iseconds) - Bootstrap mode: Creating new OVN SB cluster"
+            OVN_ARGS="--db-sb-cluster-local-port={{.OVN_SB_RAFT_PORT}} \
+              --db-sb-cluster-local-addr=$(bracketify ${K8S_NODE_IP}) \
+              --db-sb-cluster-local-proto=tcp \
+              --db-sb-create-insecure-remote=yes \
+              --no-monitor"
+          fi
 
           echo "$(date -Iseconds) - starting sbdb "
           exec /usr/share/ovn/scripts/ovn-ctl \
@@ -305,6 +497,19 @@ spec:
                 set -x
                 rm -f /var/run/ovn/ovnsb_db.pid
 
+                # Wait for local database to be ready before setting connection
+                # Init container already validated cluster state, so we just wait for DB to start
+                retries=0
+                while [[ "${retries}" -lt 30 ]]; do
+                  if ovn-sbctl --no-leader-only -t 1 list connection &>/dev/null 2>&1; then
+                    echo "$(date -Iseconds) - Local SB database is ready"
+                    break
+                  fi
+                  sleep 1
+                  (( retries += 1 ))
+                done
+
+                # Now set connection
                 retries=0
                 while [[ "${retries}" -lt 60 ]]; do
                   ovn-sbctl --no-leader-only -t 5 set-connection ptcp:{{.OVN_SB_PORT}} -- set connection . inactivity_probe=60000
@@ -341,8 +546,13 @@ spec:
           name: run-openvswitch
         - mountPath: /run/ovn/
           name: run-ovn
+        - mountPath: /etc/ovn
+          name: etc-ovn
         - mountPath: /env
           name: env-overrides
+        - mountPath: /etc/microshift-ovn
+          name: ovn-cluster-config
+          readOnly: true
         resources:
           requests:
             cpu: 10m
@@ -443,6 +653,10 @@ spec:
       - name: run-ovn
         hostPath:
           path: /var/run/ovn
+      - name: etc-ovn
+        hostPath:
+          path: /var/lib/microshift/ovn/db
+          type: DirectoryOrCreate
 
       - name: etc-openvswitch-node
         hostPath:
@@ -462,6 +676,10 @@ spec:
       - name: kubeconfig
         hostPath:
           path: {{.KubeconfigDir}}
+      - name: ovn-cluster-config
+        hostPath:
+          path: /var/lib/microshift/ovn
+          type: DirectoryOrCreate
       - name: ovnkube-config
         configMap:
           name: ovnkube-config
