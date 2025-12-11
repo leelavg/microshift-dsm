@@ -43,6 +43,12 @@ type LoadbalancerServiceController struct {
 var _ servicemanager.Service = &LoadbalancerServiceController{}
 
 func NewLoadbalancerServiceController(cfg *config.Config) *LoadbalancerServiceController {
+	// Disable built-in LoadBalancer controller when multinode is enabled (kube-vip handles it)
+	if cfg.MultiNode.Enabled {
+		klog.Info("Multinode mode enabled, using kube-vip cloud controller for LoadBalancer services")
+		return nil
+	}
+
 	ipAddresses := make([]string, 0, len(cfg.Ingress.ListenAddress))
 	nicNames := make([]string, 0, len(cfg.Ingress.ListenAddress))
 	for _, entry := range cfg.Ingress.ListenAddress {

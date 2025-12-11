@@ -14,20 +14,30 @@ MicroShift HA uses three components for control plane high availability:
 **OVN**: RAFT-based networking databases (NorthBound/SouthBound)
 **kube-vip**: Virtual IP for API HA + LoadBalancer service provider
 
+### Network Layout
+
+Pod CIDR: `10.42.0.0/16` (Kubernetes pod network)
+Service CIDR: `10.43.0.0/16` (Kubernetes service network, kube-apiserver VIP at `.1`)
+VIP: Derived from node IP - `<node-subnet>.100` (floats among control planes)
+LoadBalancer range: `<node-subnet>.101-.199` (for service type LoadBalancer)
+
+The VIP and LoadBalancer ranges are automatically calculated from the first control plane's node IP address. For example, if the first node has IP `10.89.0.11`, the VIP becomes `10.89.0.100` and LoadBalancer services get IPs from `10.89.0.101-10.89.0.199`.
+
 ```mermaid
 graph LR
     subgraph CP[Control Plane]
-        CP1[okd-1<br/>10.89.0.11]
-        CP2[okd-5<br/>10.89.0.15]
-        CP3[okd-6<br/>10.89.0.16]
+        CP1[Control Plane 1]
+        CP2[Control Plane 2]
+        CP3[Control Plane 3]
     end
 
     subgraph Workers
-        W1[okd-3]
-        W2[okd-4]
+        W1[Worker 1]
+        W2[Worker 2]
+        W3[Worker 3]
     end
 
-    VIP[VIP 10.89.0.100]
+    VIP[VIP<br/>node-subnet.100]
 
     CP1 -.RAFT.- CP2 -.RAFT.- CP3 -.RAFT.- CP1
     VIP -.floats.- CP

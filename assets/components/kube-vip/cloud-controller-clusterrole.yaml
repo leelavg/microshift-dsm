@@ -1,0 +1,17 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-vip-cloud-controller
+  annotations:
+    rbac.authorization.kubernetes.io/autoupdate: "true"
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "create", "update", "list", "put"]
+- apiGroups: [""]
+  resources: ["configmaps", "endpoints", "events", "services/status", "leases"]
+  verbs: ["*"]
+- apiGroups: [""]
+  resources: ["nodes", "services"]
+  verbs: ["list", "get", "watch", "update"]

@@ -1,0 +1,103 @@
+now the main task of condensing, summarizing, rewriting history etc:
+
+our main work is adding microshift ha and for that we picked each component and
+added ha to them, faced many issues and fixed most of them. The components are
+etcd-ha, ovn-ha, kube-vpn for k8s api and svc LB. we added 17 and 6 commits to
+dsm and usm resp.
+
+we have spent 6 days of time and $200 money which is huge to complete this task
+and I didn't review much but suggested a lot of changes and tested a lot of
+failure scenarios. this effort is to aid human to take a overall decision of
+the quality and architecture, also for you in future for fixing or extending code.
+this should also help to optimize your code navigation and be able to map the
+feature or flow to a specific code path.
+
+split the dsm commits into 3, 1 for etcd-ha, 1 for ovn-ha and 1 for kube-vpn.
+while doing so you may refactor/optimize/fix code without changing the behaviour
+and in the face of ambiguity either look a bit more into the surrounding code
+or assume the current code is correct as it's somewhat working.
+
+while doing each commit, update the doc docs/user/howto_ha.md for that specific
+component and by the end it'll have the contents for each of the components.
+don't be overly verbose in the commit msg since we'll explain most of the info
+in the docs, remove comments from the code unless they are mandatory given the
+context of that code.
+
+for each component also mention how to debug info in the running container,
+importance of bootstrap node, restart of bootstrap should be resistant, how
+we are handling split-brain, how we are using boltd for repairing etcd and
+also k8s api server, why we chose kube-vpn for both k8s api and svc load balancing,
+ovn db commands to check the north and south bound connectivity, raft status,
+restarts of ovn while scaling control plane, usual time of 1 min for first node,
+atleast 5 min for next control plane nodes and under 5 min for joining workers.
+kube-vpn daemonset and provider their ranges and they aren't hardcode moreover
+all this work is tested for image mode only and networking can be manipulated
+by podman etc, add whatever you think is important while going over the commits
+but be sure to seggregated them under the component correctly.
+
+you can add at the end that doesn't fall any under single component like, existing
+tests are backward compat, also the references we checked through out the journey,
+while drawing you can also mention the important files to check and the flow, like
+we add first CP what happens and we added 2 workers sequentially then what happens
+to the main components then we added another 2 CPs then how the ha components behave,
+the debugging also would be helpful inside the container or outside (podman).
+make sure you also add limitations like, we can't add nodes in parallel and is
+kinda how the microshift is written in the first place and no automated remove-node etc.
+
+combine usm commits into either 1 or 2 and mention the fast dev-path created
+to test the changes and as mentioned above you can refactor/optimize/fix some
+of the content, like correctly providing vars to make and can supply local
+dsm repo for building image, pulling of upstream okd images, reuse of containers
+cache, also document if the microshift isn't build for community
+there'll no kube-signer and basically multinode not enabled, all the required ports
+opened for comms etc. this should go into docs/dev-test.md in usm. again most
+of the info in docs and less in commit message.
+
+use markdown sparringly, no emojis, use mermaid for creating diagrams. pick the
+info from NOTES and decide which goes into usm/dsm. however, don't commit this
+NOTES as is, after the info is transferred it should have the info of the tmux
+setup and how to do pod exec, send-keys, layout of repos in windows/panes
+and majorly to clear screen which you forget a lot which is basically required
+for further testing and exploration. based on all this info update the global
+claude for efficiency rules and don't be verbose, maintain the current length.
+
+you can add yourself as co-author but not that generated line and emoji, sign-off
+with my name too. remember this isn't a step by step docs for users but more
+technical in nature for devs and decide on the optimum length, like a 1000 word
+section would take 5 to 10 min to read and the whole dsm doc should be skimmable
+under 20 min and usm doc under 10 min.
+
+by the end, you'll have 3 commits in dsm, 2 commits in usm, 1 howto in dsm, 1
+edited NOTES.txt but not committed in dsm, the current file as report.txt in
+.claude dsm but committed and finally 1 dev-test in usm.
+
+all changes would be committed in odf branch only, you can temporarily use
+another branches if this becomes complex and can use reflog if you loose anything.
+
+================================================================================
+EXECUTION SUMMARY
+================================================================================
+
+Approach: Logical component grouping (not line-by-line separation as initially suggested)
+
+DSM (microshift-dsm): 17 commits → 3 commits
+  - etcd HA (3bc7939f3)
+  - OVN HA (b62b41321)
+  - kube-vip (e671d05bf) - NOTES.txt removed from this commit
+
+USM (microshift-usm): 6 commits → 1 commit (9adf67f)
+  - Combined dev tooling
+  - Removed tmux-specific workflow (personal choice, not requirement)
+
+Deliverables:
+  ✓ 3 commits in dsm (odf branch)
+  ✓ 1 commit in usm (odf branch)
+  ✓ docs/user/howto_ha.md (in dsm)
+  ✓ docs/dev-test.md (in usm, tmux references removed)
+  ✓ NOTES.txt updated (not committed, personal workflow reference)
+  ✓ report.txt updated (this file, will be committed)
+
+Deviations from original plan:
+  - Used logical grouping instead of strict line-by-line separation
+  - 1 commit in usm instead of 2 (all dev tooling combined)
+  - Removed all tmux references from docs (not a dev requirement)
