@@ -41,6 +41,7 @@ type AddNodeOptions struct {
 	KubeconfigPath string
 	Timeout        time.Duration
 	Learner        bool
+	WorkerOnly     bool
 }
 
 func NewAddNodeCommand() *cobra.Command {
@@ -55,10 +56,10 @@ func NewAddNodeCommand() *cobra.Command {
 		Long: `This command joins a node to an existing MicroShift cluster by:
 1. Loading the MicroShift configuration for current node.
 2. Fetch Certificate Authorities from the cluster using provided kubeconfig.
-4. Configuring etcd cluster to add the new member.
-5. Configuring kubelet to bootstrap into the cluster.
-6. Restarting the MicroShift systemd unit.
-7. Verifying the node is ready in the cluster.`,
+3. (If not worker-only) Configuring etcd cluster to add the new member.
+4. Configuring kubelet to bootstrap into the cluster.
+5. Restarting the MicroShift systemd unit.
+6. Verifying the node is ready in the cluster.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAddNode(cmd.Context(), opts)
 		},
@@ -70,6 +71,8 @@ func NewAddNodeCommand() *cobra.Command {
 		"Timeout for cluster join operations")
 	cmd.Flags().BoolVar(&opts.Learner, "learner", true,
 		"Join the cluster as a learner node")
+	cmd.Flags().BoolVar(&opts.WorkerOnly, "worker-only", false,
+		"Join cluster as worker node without etcd member")
 
 	if version.Get().BuildVariant != version.BuildVariantCommunity {
 		cmd.Hidden = true
@@ -83,7 +86,13 @@ func runAddNode(ctx context.Context, opts *AddNodeOptions) error {
 	defer cancel()
 
 	klog.Info("Starting cluster join process...")
-	if opts.Learner {
+	if opts.WorkerOnly && opts.Learner {
+		klog.Warning("--learner flag ignored when --worker-only is set")
+	}
+
+	if opts.WorkerOnly {
+		klog.Info("Joining cluster as worker-only node (no etcd)")
+	} else if opts.Learner {
 		klog.Info("Will add etcd node as learner")
 	}
 
@@ -121,22 +130,47 @@ func runAddNode(ctx context.Context, opts *AddNodeOptions) error {
 	}
 	klog.Info("Certificate authorities fetched and written successfully")
 
-	if err := generateEtcdCertificates(cfg); err != nil {
-		return fmt.Errorf("failed to generate etcd certificates: %w", err)
-	}
-	klog.Info("Etcd certificates generated successfully")
-
-	clusterMembers, err := getClusterNodes(ctx, client)
-	if err != nil {
-		return fmt.Errorf("failed to get cluster information: %w", err)
+	if !opts.WorkerOnly {
+		if err := generateEtcdCertificates(cfg); err != nil {
+			return fmt.Errorf("failed to generate etcd certificates: %w", err)
+		}
+		klog.Info("Etcd certificates generated successfully")
 	}
 
-	if err := configureEtcdForCluster(ctx, cfg, clusterMembers, opts.Learner); err != nil {
-		return fmt.Errorf("failed to configure etcd for cluster: %w", err)
+	if !opts.WorkerOnly {
+		clusterMembers, err := getClusterNodes(ctx, client)
+		if err != nil {
+			return fmt.Errorf("failed to get cluster information: %w", err)
+		}
+
+		if err := configureEtcdForCluster(ctx, cfg, clusterMembers, opts.Learner); err != nil {
+			return fmt.Errorf("failed to configure etcd for cluster: %w", err)
+		}
+
+		if err := configureOVNForCluster(cfg, clusterMembers); err != nil {
+			return fmt.Errorf("failed to configure OVN for cluster: %w", err)
+		}
 	}
 
 	if err := configureBootstrapKubeconfig(cfg, opts.KubeconfigPath); err != nil {
 		return fmt.Errorf("failed to configure bootstrap kubeconfig: %w", err)
+	}
+
+	// Write worker-only configuration if needed
+	if opts.WorkerOnly {
+		if err := writeWorkerOnlyConfig(opts.KubeconfigPath); err != nil {
+			return fmt.Errorf("failed to write worker-only configuration: %w", err)
+		}
+		klog.Info("Worker-only configuration written successfully")
+	}
+
+	// Write cluster configuration with full control plane list for ALL nodes (both workers and CPs)
+	// This is best-effort - if it fails (e.g., API server not ready), we log a warning and continue
+	// Nodes will fall back to using their own IP which works for initial cluster formation
+	if err := writeClusterConfig(opts.KubeconfigPath); err != nil {
+		klog.Warningf("Failed to write cluster configuration (will use fallback): %v", err)
+	} else {
+		klog.Info("Cluster configuration written successfully")
 	}
 
 	if err := restartMicroShift(); err != nil {
@@ -385,6 +419,14 @@ func getClusterNodes(ctx context.Context, client kubernetes.Interface) ([]string
 		if !isNodeReady(&node) {
 			continue
 		}
+
+		// Only include control plane nodes in etcd cluster
+		// Worker-only nodes should NOT be added to ETCD_INITIAL_CLUSTER
+		if !isControlPlaneNode(&node) {
+			klog.V(2).Infof("Skipping worker-only node %s from etcd cluster members", node.Name)
+			continue
+		}
+
 		nodeIP := ""
 		for _, addr := range node.Status.Addresses {
 			if addr.Type == corev1.NodeInternalIP {
@@ -409,27 +451,20 @@ func isNodeReady(node *corev1.Node) bool {
 	return false
 }
 
+func isControlPlaneNode(node *corev1.Node) bool {
+	// Check for control plane role labels
+	// MicroShift uses node-role.kubernetes.io/master or node-role.kubernetes.io/control-plane
+	if _, hasMaster := node.Labels["node-role.kubernetes.io/master"]; hasMaster {
+		return true
+	}
+	if _, hasControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]; hasControlPlane {
+		return true
+	}
+	// Worker-only nodes only have "node-role.kubernetes.io/worker" label
+	return false
+}
+
 func configureEtcdForCluster(ctx context.Context, cfg *config.Config, clusterMembers []string, isLearner bool) error {
-	dataDir := filepath.Dir(cfg.EtcdConfigPath())
-	if err := os.MkdirAll(dataDir, 0750); err != nil {
-		return fmt.Errorf("failed to create etcd data directory: %w", err)
-	}
-
-	nodeIP := cfg.Node.NodeIP
-	if nodeIP == "" {
-		nodeIP = "127.0.0.1" // fallback
-	}
-	currentNodeMember := fmt.Sprintf("%s=https://%s:2380", cfg.CanonicalNodeName(), nodeIP)
-	cfgInitialCluster := append(clusterMembers, currentNodeMember)
-
-	clusterConfig := fmt.Sprintf("ETCD_INITIAL_CLUSTER=%s\nETCD_INITIAL_CLUSTER_STATE=existing", strings.Join(cfgInitialCluster, ","))
-
-	if err := os.WriteFile(cfg.EtcdConfigPath(), []byte(clusterConfig), 0600); err != nil {
-		return fmt.Errorf("failed to write etcd cluster configuration: %w", err)
-	}
-
-	klog.Infof("Etcd configuration written to %s", cfg.EtcdConfigPath())
-
 	certsDir := cryptomaterial.CertsDirectory(config.DataDir)
 	etcdPeerClientCertDir := cryptomaterial.EtcdPeerCertDir(certsDir)
 
@@ -501,6 +536,59 @@ func configureEtcdForCluster(ctx context.Context, cfg *config.Config, clusterMem
 		return fmt.Errorf("failed to add etcd node: %v", err)
 	}
 	klog.Infof("Successfully added etcd node: %v", response)
+
+	// Now write the config file with ALL members (existing + newly added)
+	// This must happen AFTER MemberAdd so the cluster knows about the new member
+	dataDir := filepath.Dir(cfg.EtcdConfigPath())
+	if err := os.MkdirAll(dataDir, 0750); err != nil {
+		return fmt.Errorf("failed to create etcd data directory: %w", err)
+	}
+
+	currentNodeMember := fmt.Sprintf("%s=https://%s:2380", cfg.CanonicalNodeName(), cfg.Node.NodeIP)
+	allMembers := append(clusterMembers, currentNodeMember)
+	clusterConfig := fmt.Sprintf("ETCD_INITIAL_CLUSTER=%s\nETCD_INITIAL_CLUSTER_STATE=existing", strings.Join(allMembers, ","))
+
+	if err := os.WriteFile(cfg.EtcdConfigPath(), []byte(clusterConfig), 0600); err != nil {
+		return fmt.Errorf("failed to write etcd cluster configuration: %w", err)
+	}
+
+	klog.Infof("Etcd configuration written to %s with all members", cfg.EtcdConfigPath())
+	return nil
+}
+
+func configureOVNForCluster(cfg *config.Config, clusterMembers []string) error {
+	if len(clusterMembers) == 0 {
+		return fmt.Errorf("no cluster members found")
+	}
+
+	// Extract first control plane IP (bootstrap node)
+	// clusterMembers format: ["cp1=https://10.89.0.11:2380", ...]
+	firstMember := clusterMembers[0]
+	parts := strings.SplitN(firstMember, "=", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid cluster member format: %s", firstMember)
+	}
+
+	// Extract IP from https://10.89.0.11:2380
+	bootstrapURL := parts[1]
+	bootstrapURL = strings.TrimPrefix(bootstrapURL, "https://")
+	bootstrapURL = strings.TrimPrefix(bootstrapURL, "http://")
+	bootstrapIP := strings.Split(bootstrapURL, ":")[0]
+
+	ovnConfig := fmt.Sprintf("OVN_BOOTSTRAP_NODE=%s\n", bootstrapIP)
+
+	ovnConfigPath := filepath.Join(config.DataDir, "ovn", "config")
+	ovnDir := filepath.Dir(ovnConfigPath)
+
+	if err := os.MkdirAll(ovnDir, 0755); err != nil {
+		return fmt.Errorf("failed to create OVN config directory: %w", err)
+	}
+
+	if err := os.WriteFile(ovnConfigPath, []byte(ovnConfig), 0600); err != nil {
+		return fmt.Errorf("failed to write OVN cluster configuration: %w", err)
+	}
+
+	klog.Infof("OVN configuration written to %s", ovnConfigPath)
 	return nil
 }
 
@@ -584,4 +672,196 @@ func cleanupMicroShiftData(cfg *config.Config) error {
 		}
 	}
 	return nil
+}
+
+func writeWorkerOnlyConfig(kubeconfigPath string) error {
+	// Extract control plane server address from kubeconfig
+	kubeconfig, err := clientcmd.LoadFromFile(kubeconfigPath)
+	if err != nil {
+		return fmt.Errorf("failed to load kubeconfig: %w", err)
+	}
+
+	if len(kubeconfig.Clusters) == 0 {
+		return fmt.Errorf("no clusters found in kubeconfig")
+	}
+
+	// Get the first cluster (should be the control plane)
+	var clusterServer string
+	for _, cluster := range kubeconfig.Clusters {
+		clusterServer = cluster.Server
+		break
+	}
+
+	if clusterServer == "" {
+		return fmt.Errorf("no server address found in kubeconfig")
+	}
+
+	klog.Infof("Control plane server: %s", clusterServer)
+
+	// Write marker file to indicate this is a worker-only node
+	// The control plane list is read from .cluster-config file instead
+	markerFile := filepath.Join(config.DataDir, ".worker-only")
+	markerContent := "# MicroShift worker-only node marker\n# This file is auto-generated by 'microshift add-node --worker-only'\n# The presence of this file indicates worker-only mode\n# Control plane IPs are read from .cluster-config file\n"
+	if err := os.WriteFile(markerFile, []byte(markerContent), 0600); err != nil {
+		return fmt.Errorf("failed to write worker-only marker file: %w", err)
+	}
+
+	klog.Infof("Created worker-only marker file at %s", markerFile)
+
+	return nil
+}
+
+// writeClusterConfig writes cluster topology information (control plane IPs) for all nodes
+func writeClusterConfig(kubeconfigPath string) error {
+	var controlPlaneIPs []string
+	var err error
+
+	// Try to discover control plane IPs from the K8s API first
+	client, clientErr := createKubernetesClient(kubeconfigPath)
+	if clientErr == nil {
+		controlPlaneIPs, err = discoverControlPlaneIPsFromCluster(client)
+		if err != nil {
+			klog.Warningf("Failed to discover control plane IPs from K8s API: %v, falling back to etcd config", err)
+		}
+	} else {
+		klog.Warningf("Failed to create kubernetes client: %v, falling back to etcd config", clientErr)
+	}
+
+	// Fallback: parse control plane IPs from the etcd config file
+	// The etcd config is written before this function is called and has all CP IPs
+	if len(controlPlaneIPs) == 0 {
+		cfg, cfgErr := config.ActiveConfig()
+		if cfgErr != nil {
+			return fmt.Errorf("failed to get active config for etcd fallback: %w", cfgErr)
+		}
+		controlPlaneIPs, err = parseControlPlaneIPsFromEtcdConfig(cfg.EtcdConfigPath())
+		if err != nil {
+			return fmt.Errorf("failed to parse control plane IPs from etcd config: %w", err)
+		}
+		klog.Infof("Discovered control plane IPs from etcd config: %v", controlPlaneIPs)
+	}
+
+	// Add current node's IP to the list if it's a control plane node (not worker-only)
+	// The joining node isn't in K8s yet, so we need to manually add it
+	cfg, cfgErr := config.ActiveConfig()
+	if cfgErr == nil && cfg.Node.NodeIP != "" {
+		found := false
+		for _, ip := range controlPlaneIPs {
+			if ip == cfg.Node.NodeIP {
+				found = true
+				break
+			}
+		}
+		if !found {
+			controlPlaneIPs = append(controlPlaneIPs, cfg.Node.NodeIP)
+		}
+	}
+
+	if len(controlPlaneIPs) == 0 {
+		return fmt.Errorf("no control plane nodes found in cluster or etcd config")
+	}
+
+	controlPlaneList := strings.Join(controlPlaneIPs, ",")
+	klog.Infof("Discovered control plane nodes: %s", controlPlaneList)
+
+	// Write cluster config file
+	clusterConfigFile := filepath.Join(config.DataDir, ".cluster-config")
+	configContent := fmt.Sprintf("# MicroShift cluster topology configuration\n# This file is auto-generated by 'microshift add-node'\n# DO NOT EDIT - it will be recreated on next add-node\n\ncontrolplane: %s\n", controlPlaneList)
+
+	if err := os.WriteFile(clusterConfigFile, []byte(configContent), 0600); err != nil {
+		return fmt.Errorf("failed to write cluster config file: %w", err)
+	}
+
+	klog.Infof("Created cluster config file at %s with control planes: %s", clusterConfigFile, controlPlaneList)
+	return nil
+}
+
+// discoverControlPlaneIPsFromCluster queries the K8s API for all control plane node IPs
+// Retries for up to 30 seconds to handle temporary API server unavailability
+func discoverControlPlaneIPsFromCluster(client *kubernetes.Clientset) ([]string, error) {
+	var nodes *corev1.NodeList
+	var err error
+
+	// Retry for up to 30 seconds with 2-second intervals
+	maxRetries := 15
+	for i := 0; i < maxRetries; i++ {
+		nodes, err = client.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+		if err == nil {
+			break
+		}
+		if i < maxRetries-1 {
+			klog.V(2).Infof("Failed to list nodes (attempt %d/%d), retrying in 2s: %v", i+1, maxRetries, err)
+			time.Sleep(2 * time.Second)
+		}
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	var controlPlaneIPs []string
+	for _, node := range nodes.Items {
+		// Check if node has control-plane role
+		if _, hasControlPlaneRole := node.Labels["node-role.kubernetes.io/control-plane"]; hasControlPlaneRole {
+			ip := getNodeInternalIP(&node)
+			if ip != "" {
+				controlPlaneIPs = append(controlPlaneIPs, ip)
+			}
+		} else if _, hasMasterRole := node.Labels["node-role.kubernetes.io/master"]; hasMasterRole {
+			// Also check for master label (older clusters)
+			ip := getNodeInternalIP(&node)
+			if ip != "" {
+				controlPlaneIPs = append(controlPlaneIPs, ip)
+			}
+		}
+	}
+
+	return controlPlaneIPs, nil
+}
+
+// getNodeInternalIP extracts the internal IP from a node
+func getNodeInternalIP(node *corev1.Node) string {
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == corev1.NodeInternalIP {
+			return addr.Address
+		}
+	}
+	return ""
+}
+
+// parseControlPlaneIPsFromEtcdConfig parses control plane IPs from the etcd config file
+// The etcd config has format: ETCD_INITIAL_CLUSTER=name1=https://ip1:2380,name2=https://ip2:2380,...
+func parseControlPlaneIPsFromEtcdConfig(etcdConfigPath string) ([]string, error) {
+	content, err := os.ReadFile(etcdConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read etcd config file: %w", err)
+	}
+
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "ETCD_INITIAL_CLUSTER=") {
+			value := strings.TrimPrefix(line, "ETCD_INITIAL_CLUSTER=")
+			// Parse comma-separated entries like "name1=https://ip1:2380,name2=https://ip2:2380"
+			entries := strings.Split(value, ",")
+			var ips []string
+			for _, entry := range entries {
+				// Each entry is "nodename=https://ip:port"
+				parts := strings.SplitN(entry, "=", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				url := parts[1]
+				// Extract IP from URL like "https://10.89.0.11:2380"
+				url = strings.TrimPrefix(url, "https://")
+				url = strings.TrimPrefix(url, "http://")
+				// Remove port
+				hostPort := strings.Split(url, ":")
+				if len(hostPort) > 0 && hostPort[0] != "" {
+					ips = append(ips, hostPort[0])
+				}
+			}
+			return ips, nil
+		}
+	}
+	return nil, fmt.Errorf("ETCD_INITIAL_CLUSTER not found in etcd config")
 }

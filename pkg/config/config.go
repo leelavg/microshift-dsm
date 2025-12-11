@@ -509,6 +509,16 @@ func (c *Config) updateComputedValues() error {
 		c.ApiServer.AdvertiseAddresses = append(c.ApiServer.AdvertiseAddresses, ip)
 	}
 
+	// Update the ApiServer URL to use the advertise address for multi-node clusters
+	// so that kubeconfigs generated on this node can be used by other nodes.
+	// Only update if the URL hasn't been explicitly configured by the user,
+	// advertise address was explicitly configured, and it's not localhost.
+	userConfiguredURL := c.userSettings != nil && c.userSettings.ApiServer.URL != ""
+	userConfiguredAdvertiseAddr := c.userSettings != nil && c.userSettings.ApiServer.AdvertiseAddress != ""
+	if !userConfiguredURL && userConfiguredAdvertiseAddr && c.ApiServer.AdvertiseAddress != "127.0.0.1" && c.ApiServer.AdvertiseAddress != "::1" {
+		c.ApiServer.URL = fmt.Sprintf("https://%s:%d", c.ApiServer.AdvertiseAddress, c.ApiServer.Port)
+	}
+
 	c.ApiServer.TLS.UpdateValues()
 
 	c.computeLoggingSetting()

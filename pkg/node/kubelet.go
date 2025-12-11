@@ -51,16 +51,25 @@ const (
 type KubeletServer struct {
 	kubeletflags *kubeletoptions.KubeletFlags
 	kubeconfig   *kubeletconfig.KubeletConfiguration
+	workerOnly   bool
 }
 
 func NewKubeletServer(cfg *config.Config) *KubeletServer {
-	s := &KubeletServer{}
+	s := &KubeletServer{
+		workerOnly: cfg.MultiNode.WorkerOnly,
+	}
 	s.configure(cfg)
 	return s
 }
 
-func (s *KubeletServer) Name() string           { return componentKubelet }
-func (s *KubeletServer) Dependencies() []string { return []string{"kube-apiserver"} }
+func (s *KubeletServer) Name() string { return componentKubelet }
+func (s *KubeletServer) Dependencies() []string {
+	// Worker-only nodes connect to remote API server, no local dependency
+	if s.workerOnly {
+		return []string{}
+	}
+	return []string{"kube-apiserver"}
+}
 
 func (s *KubeletServer) configure(cfg *config.Config) {
 	if err := s.writeConfig(cfg); err != nil {
@@ -84,9 +93,13 @@ func (s *KubeletServer) configure(cfg *config.Config) {
 	kubeletFlags.RuntimeCgroups = "/system.slice/crio.service"
 	kubeletFlags.HostnameOverride = cfg.Node.HostnameOverride
 	kubeletFlags.NodeIP = nodeIP
-	kubeletFlags.NodeLabels["node-role.kubernetes.io/control-plane"] = ""
-	kubeletFlags.NodeLabels["node-role.kubernetes.io/master"] = ""
-	kubeletFlags.NodeLabels["node-role.kubernetes.io/worker"] = ""
+	if cfg.MultiNode.WorkerOnly {
+		kubeletFlags.NodeLabels["node-role.kubernetes.io/worker"] = ""
+	} else {
+		kubeletFlags.NodeLabels["node-role.kubernetes.io/control-plane"] = ""
+		kubeletFlags.NodeLabels["node-role.kubernetes.io/master"] = ""
+		kubeletFlags.NodeLabels["node-role.kubernetes.io/worker"] = ""
+	}
 	kubeletFlags.NodeLabels["node.openshift.io/os_id"] = osID
 	kubeletFlags.NodeLabels["node.kubernetes.io/instance-type"] = "rhde"
 

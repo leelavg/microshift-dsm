@@ -196,6 +196,30 @@ func RunMicroshift(cfg *config.Config) error {
 		return err
 	}
 
+	// Load cluster configuration (control plane list) for ALL nodes
+	// This is written by 'microshift add-node' and contains the full CP list
+	// This must be loaded BEFORE configureWorkerOnlyMode() so it can use the CP list
+	if controlPlaneList := loadClusterConfig(); controlPlaneList != "" {
+		klog.Infof("Loaded control plane list from cluster config: %s", controlPlaneList)
+		cfg.MultiNode.Controlplane = controlPlaneList
+		// Note: Don't set MultiNode.Enabled here - that's only for worker-only nodes
+		// Setting it for CP nodes would incorrectly change scheduler/controller-manager behavior
+	}
+
+	// Check if this is a worker-only node and configure accordingly BEFORE generating certs/kubeconfigs
+	isWorkerOnly := configureWorkerOnlyMode(cfg)
+	if isWorkerOnly {
+		klog.Infof("Running in worker-only mode - skipping control plane components")
+		cfg.MultiNode.WorkerOnly = true
+		// Update API server URL to point to the control plane (use first IP if comma-separated for HA)
+		if cfg.MultiNode.Controlplane != "" {
+			controlPlanes := strings.Split(cfg.MultiNode.Controlplane, ",")
+			firstControlPlane := strings.TrimSpace(controlPlanes[0])
+			cfg.ApiServer.URL = fmt.Sprintf("https://%s:%d", firstControlPlane, cfg.ApiServer.Port)
+			klog.Infof("Updated API server URL to: %s", cfg.ApiServer.URL)
+		}
+	}
+
 	// TODO: change to only initialize what is strictly necessary for the selected role(s)
 	certChains, err := initCerts(cfg)
 	if err != nil {
@@ -210,27 +234,40 @@ func RunMicroshift(cfg *config.Config) error {
 	// Establish the context we will use to control execution
 	runCtx, runCancel := context.WithCancel(context.Background())
 	m := servicemanager.NewServiceManager(startRec)
+
 	util.Must(m.AddService(node.NewNetworkConfiguration(cfg)))
-	util.Must(m.AddService(controllers.NewEtcd(cfg)))
-	util.Must(m.AddService(sysconfwatch.NewSysConfWatchController(cfg)))
-	util.Must(m.AddService(controllers.NewKubeAPIServer(cfg)))
-	util.Must(m.AddService(controllers.NewKubeScheduler(cfg)))
-	util.Must(m.AddService(controllers.NewKubeControllerManager(runCtx, cfg)))
-	util.Must(m.AddService(controllers.NewOpenShiftCRDManager(cfg)))
-	util.Must(m.AddService(controllers.NewRouteControllerManager(cfg)))
-	util.Must(m.AddService(controllers.NewOpenShiftDefaultSCCManager(cfg)))
-	util.Must(m.AddService(mdns.NewMicroShiftmDNSController(cfg)))
-	util.Must(m.AddService(controllers.NewInfrastructureServices(cfg)))
-	util.Must(m.AddService(controllers.NewClusterPolicyController(cfg)))
-	util.Must(m.AddService(controllers.NewVersionManager(cfg)))
-	util.Must(m.AddService(controllers.NewKubeletCAManager(cfg)))
+
+	// Only add control plane services if NOT worker-only
+	if !isWorkerOnly {
+		util.Must(m.AddService(controllers.NewEtcd(cfg)))
+		util.Must(m.AddService(sysconfwatch.NewSysConfWatchController(cfg)))
+		util.Must(m.AddService(controllers.NewKubeAPIServer(cfg)))
+		util.Must(m.AddService(controllers.NewKubeScheduler(cfg)))
+		util.Must(m.AddService(controllers.NewKubeControllerManager(runCtx, cfg)))
+		util.Must(m.AddService(controllers.NewOpenShiftCRDManager(cfg)))
+		util.Must(m.AddService(controllers.NewRouteControllerManager(cfg)))
+		util.Must(m.AddService(controllers.NewOpenShiftDefaultSCCManager(cfg)))
+		util.Must(m.AddService(mdns.NewMicroShiftmDNSController(cfg)))
+		util.Must(m.AddService(controllers.NewInfrastructureServices(cfg)))
+		util.Must(m.AddService(controllers.NewClusterPolicyController(cfg)))
+		util.Must(m.AddService(controllers.NewVersionManager(cfg)))
+		util.Must(m.AddService(controllers.NewKubeletCAManager(cfg)))
+	}
+
+	// Always add kubelet and worker services
 	util.Must(m.AddService(node.NewKubeletServer(cfg)))
-	util.Must(m.AddService(loadbalancerservice.NewLoadbalancerServiceController(cfg)))
-	util.Must(m.AddService(controllers.NewKubeStorageVersionMigrator(cfg)))
-	util.Must(m.AddService(controllers.NewClusterID(cfg)))
-	util.Must(m.AddService(controllers.NewTelemetryManager(cfg)))
-	util.Must(m.AddService(controllers.NewHostsWatcherManager(cfg)))
-	util.Must(m.AddService(gdp.NewGenericDevicePlugin(cfg)))
+
+	if !isWorkerOnly {
+		// LoadbalancerServiceController returns nil for multi-CP multinode (kube-vip handles it)
+		if lbController := loadbalancerservice.NewLoadbalancerServiceController(cfg); lbController != nil {
+			util.Must(m.AddService(lbController))
+		}
+		util.Must(m.AddService(controllers.NewKubeStorageVersionMigrator(cfg)))
+		util.Must(m.AddService(controllers.NewClusterID(cfg)))
+		util.Must(m.AddService(controllers.NewTelemetryManager(cfg)))
+		util.Must(m.AddService(controllers.NewHostsWatcherManager(cfg)))
+		util.Must(m.AddService(gdp.NewGenericDevicePlugin(cfg)))
+	}
 
 	// Storing and clearing the env, so other components don't send the READY=1 until MicroShift is fully ready
 	notifySocket := os.Getenv("NOTIFY_SOCKET")
@@ -313,4 +350,54 @@ func RunMicroshift(cfg *config.Config) error {
 	}
 	klog.InfoS("MICROSHIFT STOPPED", "since-stop", time.Since(microshiftStop))
 	return nil
+}
+
+func configureWorkerOnlyMode(cfg *config.Config) bool {
+	markerFile := filepath.Join(config.DataDir, ".worker-only")
+	exists, err := util.PathExists(markerFile)
+	if err != nil {
+		klog.Warningf("Failed to check for worker-only marker file: %v", err)
+		return false
+	}
+
+	if !exists {
+		return false
+	}
+
+	klog.Infof("Worker-only marker file found at %s", markerFile)
+	return true
+}
+
+// loadClusterConfig reads the cluster configuration file to get the full control plane list
+// This file is written by 'microshift add-node' for all joining nodes (both workers and CPs)
+func loadClusterConfig() string {
+	clusterConfigFile := filepath.Join(config.DataDir, ".cluster-config")
+	exists, err := util.PathExists(clusterConfigFile)
+	if err != nil {
+		klog.V(2).Infof("Failed to check for cluster config file: %v", err)
+		return ""
+	}
+
+	if !exists {
+		klog.V(2).Infof("Cluster config file does not exist at %s", clusterConfigFile)
+		return ""
+	}
+
+	// Read the config file
+	content, err := os.ReadFile(clusterConfigFile)
+	if err != nil {
+		klog.Warningf("Failed to read cluster config file: %v", err)
+		return ""
+	}
+
+	// Parse content to extract control plane list
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "controlplane:") {
+			controlPlaneList := strings.TrimSpace(strings.TrimPrefix(line, "controlplane:"))
+			return controlPlaneList
+		}
+	}
+
+	return ""
 }

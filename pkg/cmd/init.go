@@ -388,6 +388,14 @@ func initKubeconfigs(
 		return fmt.Errorf("failed to load the internal trust signer: %v", err)
 	}
 
+	// For worker-only nodes, use external CA since they connect to remote API server
+	// For control plane or regular nodes, use internal CA for localhost connections
+	kubeConfigTrustCA := internalTrustPEM
+	if cfg.MultiNode.WorkerOnly {
+		kubeConfigTrustCA = externalTrustPEM
+		klog.Info("Using external CA for worker-only node kubeconfigs")
+	}
+
 	adminKubeconfigCertPEM, adminKubeconfigKeyPEM, err := certChains.GetCertKey("admin-kubeconfig-signer", "admin-kubeconfig-client")
 	if err != nil {
 		return err
@@ -470,10 +478,15 @@ func initKubeconfigs(
 		}
 	}
 
+	// KubeAdmin kubeconfig needs to use correct CA for worker-only nodes
+	kubeAdminTrustCA := internalTrustPEM
+	if cfg.MultiNode.WorkerOnly {
+		kubeAdminTrustCA = externalTrustPEM
+	}
 	if err := util.KubeConfigWithClientCerts(
 		cfg.KubeConfigPath(config.KubeAdmin),
 		cfg.ApiServer.URL,
-		internalTrustPEM,
+		kubeAdminTrustCA,
 		adminKubeconfigCertPEM,
 		adminKubeconfigKeyPEM,
 	); err != nil {
@@ -514,7 +527,7 @@ func initKubeconfigs(
 	if err := util.KubeConfigWithClientCerts(
 		cfg.KubeConfigPath(config.Kubelet),
 		cfg.ApiServer.URL,
-		internalTrustPEM,
+		kubeConfigTrustCA,
 		kubeletCertPEM, kubeletKeyPEM,
 	); err != nil {
 		return err

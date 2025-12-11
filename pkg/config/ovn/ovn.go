@@ -24,6 +24,9 @@ const (
 	// used for multinode ovn database transport
 	OVN_NB_PORT = "9641"
 	OVN_SB_PORT = "9642"
+	// RAFT clustering ports for OVN database replication
+	OVN_NB_RAFT_PORT = "9643"
+	OVN_SB_RAFT_PORT = "9644"
 
 	// geneve header length for IPv4
 	GeneveHeaderLengthIPv4 = 58

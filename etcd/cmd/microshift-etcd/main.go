@@ -22,6 +22,7 @@ func main() {
 	}
 
 	cmd.AddCommand(NewRunEtcdCommand())
+	cmd.AddCommand(NewMemberCommand())
 	cmd.AddCommand(NewVersionCommand(genericclioptions.IOStreams{In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr}))
 	os.Exit(cli.Run(cmd))
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	configv1 "github.com/openshift/api/config/v1"
+	"github.com/openshift/microshift/etcd/pkg/etcdmembers"
 	"github.com/openshift/microshift/pkg/config"
 	"github.com/openshift/microshift/pkg/util/cryptomaterial"
 
@@ -101,6 +102,12 @@ func (s *EtcdService) configure(cfg *config.Config) {
 	s.etcdCfg.PeerTLSInfo.TrustedCAFile = etcdSignerCertPath
 
 	s.etcdCfg.MaxLearners = MaxLearners
+
+	// Regenerate config files from etcd database if resuming (self-healing)
+	// This ensures config files are always in sync with actual cluster membership
+	if err := regenerateConfigsFromDB(dataDir); err != nil {
+		klog.Warningf("Failed to regenerate configs from etcd DB: %v", err)
+	}
 
 	updateConfigFromFile(s.etcdCfg, getConfigFilePath())
 }
@@ -248,4 +255,47 @@ func updateConfigFromFile(etcdCfg *etcd.Config, configPath string) {
 			etcdCfg.ClusterState = val
 		}
 	}
+}
+
+// regenerateConfigsFromDB reads etcd member list from the local bbolt database
+// and regenerates the config files. This provides self-healing for bootstrap nodes
+// and ensures configs stay in sync with actual cluster membership.
+func regenerateConfigsFromDB(etcdDataDir string) error {
+	members, err := etcdmembers.ReadMembersFromDB(etcdDataDir)
+	if err != nil {
+		return fmt.Errorf("failed to read members from DB: %w", err)
+	}
+
+	// No members means first boot or empty DB - skip regeneration
+	if len(members) == 0 {
+		klog.V(2).Info("No members found in etcd DB, skipping config regeneration")
+		return nil
+	}
+
+	// Build ETCD_INITIAL_CLUSTER string and extract control plane IPs
+	initialCluster := etcdmembers.BuildInitialCluster(members)
+	controlPlaneIPs := etcdmembers.ExtractControlPlaneIPs(members)
+
+	if initialCluster == "" {
+		klog.V(2).Info("Empty initial cluster string, skipping config regeneration")
+		return nil
+	}
+
+	// Write etcd/config
+	etcdConfigContent := fmt.Sprintf("ETCD_INITIAL_CLUSTER=%s\nETCD_INITIAL_CLUSTER_STATE=existing\n", initialCluster)
+	etcdConfigPath := filepath.Join(etcdDataDir, "config")
+	if err := os.WriteFile(etcdConfigPath, []byte(etcdConfigContent), 0600); err != nil {
+		return fmt.Errorf("failed to write etcd config: %w", err)
+	}
+
+	// Write .cluster-config (used by OVN, kubelet, etc.)
+	clusterConfigContent := fmt.Sprintf("# Auto-regenerated from etcd database\ncontrolplane: %s\n",
+		strings.Join(controlPlaneIPs, ","))
+	clusterConfigPath := filepath.Join(config.DataDir, ".cluster-config")
+	if err := os.WriteFile(clusterConfigPath, []byte(clusterConfigContent), 0600); err != nil {
+		return fmt.Errorf("failed to write cluster config: %w", err)
+	}
+
+	klog.Infof("Regenerated cluster configs from etcd DB: %d members, IPs: %v", len(members), controlPlaneIPs)
+	return nil
 }
