@@ -206,6 +206,16 @@ func RunMicroshift(cfg *config.Config) error {
 		// Setting it for CP nodes would incorrectly change scheduler/controller-manager behavior
 	}
 
+	// Check for enable-ha marker and configure accordingly
+	// Only set Controlplane when marker exists, don't touch Enabled (already set at build time)
+	if configureEnableHAMode(cfg) {
+		klog.Infof("Running in HA mode - enabling kube-vip for single control plane")
+		// If no control plane list exists yet (first node), use current node IP
+		if cfg.MultiNode.Controlplane == "" {
+			cfg.MultiNode.Controlplane = cfg.Node.NodeIP
+		}
+	}
+
 	// Check if this is a worker-only node and configure accordingly BEFORE generating certs/kubeconfigs
 	isWorkerOnly := configureWorkerOnlyMode(cfg)
 	if isWorkerOnly {
@@ -400,4 +410,26 @@ func loadClusterConfig() string {
 	}
 
 	return ""
+}
+
+
+// configureEnableHAMode checks for .enable-ha marker file and enables HA features
+// This allows kube-vip deployment even for single control plane nodes
+func configureEnableHAMode(cfg *config.Config) bool {
+	// Check in /var/lib/microshift-data (where postinstall.sh creates it)
+	markerFile := "/var/lib/microshift-data/.enable-ha"
+	klog.Infof("Checking for enable-ha marker file at: %s", markerFile)
+	exists, err := util.PathExists(markerFile)
+	if err != nil {
+		klog.Warningf("Failed to check for enable-ha marker file at %s: %v", markerFile, err)
+		return false
+	}
+
+	if !exists {
+		klog.Infof("Enable-HA marker file not found at %s", markerFile)
+		return false
+	}
+
+	klog.Infof("Enable-HA marker file found at %s - enabling HA mode", markerFile)
+	return true
 }

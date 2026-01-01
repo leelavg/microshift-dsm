@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/openshift/microshift/pkg/config"
 	"github.com/openshift/microshift/pkg/servicemanager"
+	"github.com/openshift/microshift/pkg/util"
 )
 
 const (
@@ -43,10 +45,24 @@ type LoadbalancerServiceController struct {
 var _ servicemanager.Service = &LoadbalancerServiceController{}
 
 func NewLoadbalancerServiceController(cfg *config.Config) *LoadbalancerServiceController {
-	// Disable built-in LoadBalancer controller when multinode is enabled (kube-vip handles it)
+	// Disable built-in LoadBalancer controller when kube-vip is handling it
+	// This happens when: enable-ha marker exists OR multi-CP setup
 	if cfg.MultiNode.Enabled {
-		klog.Info("Multinode mode enabled, using kube-vip cloud controller for LoadBalancer services")
-		return nil
+		// Check if enable-ha marker file exists
+		markerFile := "/var/lib/microshift-data/.enable-ha"
+		if exists, _ := util.PathExists(markerFile); exists {
+			klog.Info("Enable-HA mode detected, using kube-vip cloud controller for LoadBalancer services")
+			return nil
+		}
+
+		// Check if this is a multi-CP setup
+		if strings.Contains(cfg.MultiNode.Controlplane, ",") {
+			klog.Info("Multi-CP mode detected, using kube-vip cloud controller for LoadBalancer services")
+			return nil
+		}
+
+		// Single CP without enable-ha marker - use built-in LoadBalancer
+		klog.Info("Single CP without enable-ha, using built-in LoadBalancer controller")
 	}
 
 	ipAddresses := make([]string, 0, len(cfg.Ingress.ListenAddress))
