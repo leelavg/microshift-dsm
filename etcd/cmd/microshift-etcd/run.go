@@ -125,6 +125,14 @@ func (s *EtcdService) Run() error {
 		return fmt.Errorf("microshift-etcd failed to start: %v", err)
 	}
 	<-e.Server.ReadyNotify()
+	
+	// Regenerate cluster configs from etcd DB on every startup
+	// This ensures .cluster-config exists with enable_ha field for bootstrap and joining nodes
+	// Use s.etcdCfg.Dir which is the actual etcd data directory
+	if err := regenerateConfigsFromDB(s.etcdCfg.Dir); err != nil {
+		klog.Warningf("Failed to regenerate cluster configs: %v", err)
+	}
+	
 	defer func() {
 		e.Server.Stop()
 		<-e.Server.StopNotify()
@@ -288,9 +296,16 @@ func regenerateConfigsFromDB(etcdDataDir string) error {
 		return fmt.Errorf("failed to write etcd config: %w", err)
 	}
 
-	// Write .cluster-config (used by OVN, kubelet, etc.)
-	clusterConfigContent := fmt.Sprintf("# Auto-regenerated from etcd database\ncontrolplane: %s\n",
-		strings.Join(controlPlaneIPs, ","))
+	// Write .cluster-config (used by OVN, kubelet, kube-vip, etc.)
+	// Check if enable-ha marker exists to persist HA decision cluster-wide
+	enableHA := "false"
+	markerFile := filepath.Join(config.DataDir, ".enable-ha")
+	if exists, _ := os.Stat(markerFile); exists == nil {
+		enableHA = "true"
+	}
+	
+	clusterConfigContent := fmt.Sprintf("# Auto-regenerated from etcd database\ncontrolplane: %s\nenable_ha: %s\n",
+		strings.Join(controlPlaneIPs, ","), enableHA)
 	clusterConfigPath := filepath.Join(config.DataDir, ".cluster-config")
 	if err := os.WriteFile(clusterConfigPath, []byte(clusterConfigContent), 0600); err != nil {
 		return fmt.Errorf("failed to write cluster config: %w", err)

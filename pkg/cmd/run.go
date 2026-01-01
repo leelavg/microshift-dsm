@@ -196,6 +196,29 @@ func RunMicroshift(cfg *config.Config) error {
 		return err
 	}
 
+
+	// Bootstrap node: Create .cluster-config if it doesn't exist yet
+	// This ensures all nodes have a single source of truth for cluster topology and HA mode
+	clusterConfigFile := filepath.Join(config.DataDir, ".cluster-config")
+	if exists, _ := util.PathExists(clusterConfigFile); !exists {
+		// Bootstrap node: no .cluster-config exists yet
+		// Joining nodes receive .cluster-config via add-node, so they skip this
+		enableHA := false
+		markerFile := filepath.Join(config.DataDir, ".enable-ha")
+		if markerExists, _ := util.PathExists(markerFile); markerExists {
+			enableHA = true
+		}
+
+		configContent := fmt.Sprintf("# MicroShift cluster configuration\n# Created by bootstrap node on first start\n# Updated by 'microshift add-node' when topology changes\n\ncontrolplane: %s\nenable_ha: %t\n",
+			cfg.Node.NodeIP, enableHA)
+
+		if err := os.WriteFile(clusterConfigFile, []byte(configContent), 0600); err != nil {
+			klog.Warningf("Failed to create cluster config file: %v", err)
+		} else {
+			klog.Infof("Bootstrap: Created .cluster-config with controlplane=%s, enable_ha=%t", cfg.Node.NodeIP, enableHA)
+		}
+	}
+
 	// Load cluster configuration (control plane list) for ALL nodes
 	// This is written by 'microshift add-node' and contains the full CP list
 	// This must be loaded BEFORE configureWorkerOnlyMode() so it can use the CP list
@@ -413,23 +436,34 @@ func loadClusterConfig() string {
 }
 
 
-// configureEnableHAMode checks for .enable-ha marker file and enables HA features
-// This allows kube-vip deployment even for single control plane nodes
+// configureEnableHAMode reads the enable_ha field from .cluster-config
+// This ensures cluster-wide consistency - all nodes use the same HA decision
 func configureEnableHAMode(cfg *config.Config) bool {
-	// Check in /var/lib/microshift-data (where postinstall.sh creates it)
-	markerFile := "/var/lib/microshift-data/.enable-ha"
-	klog.Infof("Checking for enable-ha marker file at: %s", markerFile)
-	exists, err := util.PathExists(markerFile)
+	clusterConfigFile := filepath.Join(config.DataDir, ".cluster-config")
+	exists, err := util.PathExists(clusterConfigFile)
+	if err != nil || !exists {
+		klog.V(2).Infof("Cluster config file not found, HA mode disabled")
+		return false
+	}
+
+	content, err := os.ReadFile(clusterConfigFile)
 	if err != nil {
-		klog.Warningf("Failed to check for enable-ha marker file at %s: %v", markerFile, err)
+		klog.Warningf("Failed to read cluster config: %v", err)
 		return false
 	}
 
-	if !exists {
-		klog.Infof("Enable-HA marker file not found at %s", markerFile)
-		return false
+	// Parse enable_ha field
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "enable_ha:") {
+			value := strings.TrimSpace(strings.TrimPrefix(line, "enable_ha:"))
+			if value == "true" {
+				klog.Infof("Enable-HA mode detected from cluster config")
+				return true
+			}
+		}
 	}
 
-	klog.Infof("Enable-HA marker file found at %s - enabling HA mode", markerFile)
-	return true
+	klog.V(2).Infof("Enable-HA not set in cluster config, HA mode disabled")
+	return false
 }

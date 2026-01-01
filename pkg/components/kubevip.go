@@ -4,13 +4,33 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 
 	"github.com/openshift/microshift/pkg/assets"
 	"github.com/openshift/microshift/pkg/config"
-	"github.com/openshift/microshift/pkg/util"
 	"k8s.io/klog/v2"
 )
+
+// isEnableHAMode reads enable_ha field from .cluster-config
+// Returns true if HA mode is enabled cluster-wide
+func isEnableHAMode() bool {
+	clusterConfigFile := "/var/lib/microshift/.cluster-config"
+	content, err := os.ReadFile(clusterConfigFile)
+	if err != nil {
+		return false
+	}
+
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "enable_ha:") {
+			value := strings.TrimSpace(strings.TrimPrefix(line, "enable_ha:"))
+			return value == "true"
+		}
+	}
+	return false
+}
+
 
 // calculateVIP derives VIP address from node IP by setting last octet to 100
 // Example: 10.89.0.11 -> 10.89.0.100
@@ -49,22 +69,22 @@ func calculateServiceLBRange(nodeIP string) string {
 }
 
 // shouldDeployKubeVipDaemonSet determines if kube-vip DaemonSet should be deployed
-// Deploy VIP when enable-ha marker exists OR when there are multiple control planes
+// Deploy VIP when enable_ha is set in cluster config OR when there are multiple control planes
 func shouldDeployKubeVipDaemonSet(cfg *config.Config) bool {
 	// Skip on worker-only nodes
 	if cfg.MultiNode.WorkerOnly {
 		return false
 	}
 
-	// Only deploy in multinode mode
-	if !cfg.MultiNode.Enabled {
-		return false
+	// Check if enable_ha is set in cluster config (cluster-wide decision)
+	// This works for both bootstrap and multinode scenarios
+	if isEnableHAMode() {
+		return true
 	}
 
-	// Check if enable-ha marker file exists (for single CP HA mode)
-	markerFile := "/var/lib/microshift-data/.enable-ha"
-	if exists, _ := util.PathExists(markerFile); exists {
-		return true
+	// Only check multinode conditions if not in enable_ha mode
+	if !cfg.MultiNode.Enabled {
+		return false
 	}
 
 	// Check if this is a multi-CP setup (comma in Controlplane field)
@@ -72,28 +92,28 @@ func shouldDeployKubeVipDaemonSet(cfg *config.Config) bool {
 		return true
 	}
 
-	// Single CP without enable-ha marker - don't deploy
-	klog.V(2).Infof("Single control plane without enable-ha marker, skipping kube-vip DaemonSet")
+	// Single CP without enable-ha - don't deploy
+	klog.V(2).Infof("Single control plane without enable-ha, skipping kube-vip DaemonSet")
 	return false
 }
 
 // shouldDeployKubeVipCloudController determines if kube-vip cloud-controller should be deployed
-// Deploy cloud-controller when enable-ha marker exists OR in multinode setups
+// Deploy cloud-controller when enable_ha is set in cluster config OR in multinode setups
 func shouldDeployKubeVipCloudController(cfg *config.Config) bool {
 	// Skip on worker-only nodes
 	if cfg.MultiNode.WorkerOnly {
 		return false
 	}
 
-	// Only deploy in multinode mode
-	if !cfg.MultiNode.Enabled {
-		return false
+	// Check if enable_ha is set in cluster config (cluster-wide decision)
+	// This works for both bootstrap and multinode scenarios
+	if isEnableHAMode() {
+		return true
 	}
 
-	// Check if enable-ha marker file exists (for single CP HA mode)
-	markerFile := "/var/lib/microshift-data/.enable-ha"
-	if exists, _ := util.PathExists(markerFile); exists {
-		return true
+	// Only check multinode conditions if not in enable_ha mode
+	if !cfg.MultiNode.Enabled {
+		return false
 	}
 
 	// Check if this is a multi-CP setup (comma in Controlplane field)
@@ -101,7 +121,7 @@ func shouldDeployKubeVipCloudController(cfg *config.Config) bool {
 		return true
 	}
 
-	// Single CP without enable-ha marker - don't deploy
+	// Single CP without enable-ha - don't deploy
 	return false
 }
 

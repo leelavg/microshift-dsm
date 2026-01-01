@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -22,8 +23,26 @@ import (
 
 	"github.com/openshift/microshift/pkg/config"
 	"github.com/openshift/microshift/pkg/servicemanager"
-	"github.com/openshift/microshift/pkg/util"
 )
+
+// isEnableHAMode reads enable_ha field from .cluster-config
+// Returns true if HA mode is enabled cluster-wide
+func isEnableHAMode() bool {
+	clusterConfigFile := "/var/lib/microshift/.cluster-config"
+	content, err := os.ReadFile(clusterConfigFile)
+	if err != nil {
+		return false
+	}
+
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "enable_ha:") {
+			value := strings.TrimSpace(strings.TrimPrefix(line, "enable_ha:"))
+			return value == "true"
+		}
+	}
+	return false
+}
 
 const (
 	defaultInformerResyncPeriod = 10 * time.Minute
@@ -45,24 +64,11 @@ type LoadbalancerServiceController struct {
 var _ servicemanager.Service = &LoadbalancerServiceController{}
 
 func NewLoadbalancerServiceController(cfg *config.Config) *LoadbalancerServiceController {
-	// Disable built-in LoadBalancer controller when kube-vip is handling it
-	// This happens when: enable-ha marker exists OR multi-CP setup
-	if cfg.MultiNode.Enabled {
-		// Check if enable-ha marker file exists
-		markerFile := "/var/lib/microshift-data/.enable-ha"
-		if exists, _ := util.PathExists(markerFile); exists {
-			klog.Info("Enable-HA mode detected, using kube-vip cloud controller for LoadBalancer services")
-			return nil
-		}
-
-		// Check if this is a multi-CP setup
-		if strings.Contains(cfg.MultiNode.Controlplane, ",") {
-			klog.Info("Multi-CP mode detected, using kube-vip cloud controller for LoadBalancer services")
-			return nil
-		}
-
-		// Single CP without enable-ha marker - use built-in LoadBalancer
-		klog.Info("Single CP without enable-ha, using built-in LoadBalancer controller")
+	// Disable built-in LoadBalancer controller when HA mode is enabled
+	// HA mode is determined cluster-wide via .cluster-config file
+	if cfg.MultiNode.Enabled && isEnableHAMode() {
+		klog.Info("HA mode enabled (from .cluster-config), using kube-vip for LoadBalancer services")
+		return nil
 	}
 
 	ipAddresses := make([]string, 0, len(cfg.Ingress.ListenAddress))
