@@ -31,15 +31,6 @@ func isEnableHAMode() bool {
 	return false
 }
 
-// isBootstrapNode checks if this is the bootstrap node by looking for .enable-ha marker
-// Only the bootstrap node has this marker and should deploy cluster-wide resources
-func isBootstrapNode() bool {
-	markerFile := "/var/lib/microshift/.enable-ha"
-	_, err := os.Stat(markerFile)
-	return err == nil
-}
-
-
 // calculateVIP derives VIP address from node IP by setting last octet to 100
 // Example: 10.89.0.11 -> 10.89.0.100
 func calculateVIP(nodeIP string) string {
@@ -142,13 +133,8 @@ func deployKubeVip(ctx context.Context, cfg *config.Config, kubeconfigPath strin
 		return nil
 	}
 
-	// Only bootstrap node deploys cluster-wide kube-vip resources
-	// Joining control planes skip deployment to prevent duplicates
-	if !isBootstrapNode() {
-		klog.V(2).Infof("Not bootstrap node, skipping kube-vip deployment")
-		return nil
-	}
-
+	// All CPs in HA mode deploy kube-vip resources
+	// Kubernetes ensures idempotency - multiple applies won't create duplicates
 	if deployDaemonSet {
 		klog.Infof("Deploying kube-vip DaemonSet for HA control plane")
 	}

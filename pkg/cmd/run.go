@@ -88,6 +88,20 @@ func NewRunMicroshiftCommand() *cobra.Command {
 
 		cfg = config.ConfigMultiNode(cfg, multinode)
 
+		// Add VIP to TLS SANs for HA mode from .tls-san marker file
+		// Bootstrap writes VIP to this file, joining CPs copy it
+		tlsSanFile := filepath.Join(config.DataDir, ".tls-san")
+		if exists, _ := util.PathExists(tlsSanFile); exists {
+			content, err := os.ReadFile(tlsSanFile)
+			if err == nil {
+				vip := strings.TrimSpace(string(content))
+				if vip != "" {
+					cfg.ApiServer.SubjectAltNames = append(cfg.ApiServer.SubjectAltNames, vip)
+					klog.Infof("Added VIP %s to API server certificate SANs from .tls-san marker", vip)
+				}
+			}
+		}
+
 		for _, w := range cfg.Warnings {
 			klog.Warningf("Configuration warning: %s", w)
 		}
@@ -195,7 +209,6 @@ func RunMicroshift(cfg *config.Config) error {
 		writeLogFileError(preRunFailedLogPath, err)
 		return err
 	}
-
 
 	// Bootstrap node: Create .cluster-config if it doesn't exist yet
 	// This ensures all nodes have a single source of truth for cluster topology and HA mode
@@ -434,7 +447,6 @@ func loadClusterConfig() string {
 
 	return ""
 }
-
 
 // configureEnableHAMode reads the enable_ha field from .cluster-config
 // This ensures cluster-wide consistency - all nodes use the same HA decision

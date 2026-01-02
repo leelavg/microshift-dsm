@@ -160,8 +160,11 @@ Runs on control planes only. Manages VIP (x.x.x.100) on `br-ex` interface using 
 Watches LoadBalancer services, allocates IPs from range (x.x.x.101-199), updates service status. Runs on control planes with pod network (not hostNetwork).
 
 **Deployment Logic** (pkg/components/kubevip.go):
-- DaemonSet: Only with 2+ CPs (HA VIP needed)
-- Cloud provider: Always in multinode mode (even single CP needs LoadBalancer support)
+- Bootstrap check: Only bootstrap node (with .enable-ha marker) deploys kube-vip resources
+- Joining CPs: Skip deployment to prevent duplicates
+- DaemonSet: Only deployed when HA mode enabled (VIP for API HA)
+- Cloud provider: Only deployed when HA mode enabled (LoadBalancer service provider)
+- Non-HA multinode: Uses built-in LoadBalancer controller instead
 
 **IP Calculation** (pkg/components/kubevip.go):
 Auto-calculates from node IP if not configured:
@@ -169,7 +172,7 @@ Auto-calculates from node IP if not configured:
 - LB range: Last octet → 101-199 (10.89.0.11 → 10.89.0.101-199)
 
 **Built-in Controller Disabled** (pkg/loadbalancerservice/controller.go):
-MicroShift's built-in LoadBalancer controller disabled in multinode mode. kube-vip handles all LoadBalancer services.
+MicroShift's built-in LoadBalancer controller disabled when HA mode enabled. kube-vip cloud provider handles LoadBalancer services in HA clusters. Non-HA multinode clusters use the built-in controller.
 
 ### Interface Choice
 
@@ -220,6 +223,7 @@ Measured on container-based deployments:
 - **No automated remove-node**: Manual etcd member removal required
 - **2-node clusters discouraged**: etcd and OVN both need 2/2 quorum (no fault tolerance)
 - **Image mode only**: Tested exclusively with container deployments
+- **HA required for control planes**: Cannot add control planes to non-HA clusters (validated at runtime)
 
 ## Backward Compatibility
 
