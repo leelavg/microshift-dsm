@@ -107,3 +107,35 @@ func extractIPFromURL(rawURL string) string {
 	host := parsed.Hostname()
 	return host
 }
+
+// WriteClusterConfig writes .cluster-config file from member list and enable_ha marker.
+// Called by both microshift-etcd (on every restart) and microshift (before reading config).
+// Returns nil if no members to write.
+func WriteClusterConfig(members []Member, dataDir string) error {
+	if len(members) == 0 {
+		return nil // Nothing to write
+	}
+
+	controlPlaneIPs := ExtractControlPlaneIPs(members)
+	if len(controlPlaneIPs) == 0 {
+		return nil
+	}
+
+	// Determine enable_ha from .enable-ha marker (present on all CPs in HA clusters)
+	enableHA := "false"
+	markerFile := filepath.Join(dataDir, ".enable-ha")
+	if _, err := os.Stat(markerFile); err == nil {
+		enableHA = "true"
+	}
+
+	// Write .cluster-config
+	clusterConfigPath := filepath.Join(dataDir, ".cluster-config")
+	clusterConfigContent := fmt.Sprintf("# Auto-regenerated from etcd database\ncontrolplane: %s\nenable_ha: %s\n",
+		strings.Join(controlPlaneIPs, ","), enableHA)
+
+	if err := os.WriteFile(clusterConfigPath, []byte(clusterConfigContent), 0600); err != nil {
+		return fmt.Errorf("failed to write cluster config: %w", err)
+	}
+
+	return nil
+}

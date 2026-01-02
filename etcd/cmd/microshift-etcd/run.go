@@ -297,19 +297,7 @@ func regenerateConfigsFromDB(etcdDataDir string) error {
 	}
 
 	// Write .cluster-config (used by OVN, kubelet, kube-vip, etc.)
-	// Determine enable_ha from .enable-ha marker (present on all CPs in HA clusters)
-	enableHA := "false"
-	clusterConfigPath := filepath.Join(config.DataDir, ".cluster-config")
-	markerFile := filepath.Join(config.DataDir, ".enable-ha")
-
-	if _, err := os.Stat(markerFile); err == nil {
-		enableHA = "true"
-		klog.V(2).Info("Detected enable_ha=true from .enable-ha marker")
-	}
-
-	clusterConfigContent := fmt.Sprintf("# Auto-regenerated from etcd database\ncontrolplane: %s\nenable_ha: %s\n",
-		strings.Join(controlPlaneIPs, ","), enableHA)
-	if err := os.WriteFile(clusterConfigPath, []byte(clusterConfigContent), 0600); err != nil {
+	if err := etcdmembers.WriteClusterConfig(members, config.DataDir); err != nil {
 		return fmt.Errorf("failed to write cluster config: %w", err)
 	}
 

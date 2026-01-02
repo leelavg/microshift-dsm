@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coreos/go-systemd/daemon"
+	"github.com/openshift/microshift/etcd/pkg/etcdmembers"
 	"github.com/openshift/microshift/pkg/admin/data"
 	"github.com/openshift/microshift/pkg/admin/prerun"
 	"github.com/openshift/microshift/pkg/config"
@@ -208,6 +209,14 @@ func RunMicroshift(cfg *config.Config) error {
 	if err := prerun.FeatureGateLockManagement(cfg); err != nil {
 		writeLogFileError(preRunFailedLogPath, err)
 		return err
+	}
+
+	// CRITICAL: Regenerate cluster configs from etcd DB BEFORE reading .cluster-config
+	// This ensures .cluster-config always reflects actual etcd cluster membership
+	// Safe on bootstrap (returns nil if no DB exists yet)
+	etcdDataDir := filepath.Join(config.DataDir, "etcd")
+	if err := regenerateClusterConfigFromEtcd(etcdDataDir); err != nil {
+		klog.Warningf("Failed to regenerate cluster config from etcd DB: %v", err)
 	}
 
 	// Bootstrap node: Create .cluster-config if it doesn't exist yet
@@ -478,4 +487,29 @@ func configureEnableHAMode(cfg *config.Config) bool {
 
 	klog.V(2).Infof("Enable-HA not set in cluster config, HA mode disabled")
 	return false
+}
+
+// regenerateClusterConfigFromEtcd reads etcd membership from local DB and regenerates .cluster-config
+// This is called BEFORE microshift loads config to ensure OVN gets the latest CP list
+// Safe to call on bootstrap (returns nil if DB doesn't exist)
+func regenerateClusterConfigFromEtcd(etcdDataDir string) error {
+	members, err := etcdmembers.ReadMembersFromDB(etcdDataDir)
+	if err != nil {
+		return fmt.Errorf("failed to read members from etcd DB: %w", err)
+	}
+
+	// No members means first boot or empty DB - skip regeneration
+	if len(members) == 0 {
+		klog.V(2).Info("No etcd members found in DB, skipping cluster config regeneration")
+		return nil
+	}
+
+	// Use shared helper to write .cluster-config
+	if err := etcdmembers.WriteClusterConfig(members, config.DataDir); err != nil {
+		return fmt.Errorf("failed to write cluster config: %w", err)
+	}
+
+	controlPlaneIPs := etcdmembers.ExtractControlPlaneIPs(members)
+	klog.Infof("Regenerated .cluster-config from etcd DB: %d members, IPs: %v", len(members), controlPlaneIPs)
+	return nil
 }
