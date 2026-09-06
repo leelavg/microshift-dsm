@@ -3,12 +3,12 @@
     "base": "5.1.0-0.nightly-2026-09-03-150256"
   },
   "images": {
-    "cli": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:287240aa2e950ec7b7546420def042e4e9db7ea05a514ae322dd5f5fd424061e",
-    "coredns": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:f75939c9e53b280dab85707a5ad8f2014f4a742cb79ac754ba6222bedae91639",
-    "haproxy-router": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:2a8c04da3f1fa1d99931b4aac71cf544cbea853fad34180d8908dfcbfd36bfa1",
-    "haproxy-router-haproxy32": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:9d40caf7c3a21b802c6632cf968b8c17f5bb756b6ff0564b77ee2dc9898e38f3",
-    "kube-rbac-proxy": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:490041f0e6b6b5f8aee9809a5d7b9afc397471a3280185c4b2b244c4aac79e7c",
-    "ovn-kubernetes-microshift": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:f8dd484d239cf3bcb0a39d926111f250c15910762400cf5a2c93abd654022e99",
+    "cli": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:e4c41bc2557178602476d207dac34760d1967ff2e454962a9db4d551033ca215",
+    "coredns": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:5cd77cb18c6e915931e52472a71cda304850994ad644348f8f60cb4d3b3b8ff8",
+    "haproxy-router": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:12b9614d85ddb1fe98a4283556165526cfd9a4cfc65851d8d910caf1a3f5fa1c",
+    "haproxy-router-haproxy32": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:5a5286ab6f44d224967830170c8cb2b782c9cf5b8a4b3c23a9e21e5d0052bbd0",
+    "kube-rbac-proxy": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:8e4bdb3b57e50d211708961a76efb25239f1df9c2ed8d313161dc561aed3ed95",
+    "ovn-kubernetes-microshift": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:413651dd6eaa9f4e3a1a790d41449b725072d2e889624bed5d1e8baa0ead6e34",
     "pod": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:3708ab75b6ca2a1f10b96d12258055a6ce5eabe0d75a098d986640eae2438506",
     "service-ca-operator": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:732559eb99033bfeac48fde25fa1979e67c18476a747ca8d05473fe1917cfa48",
     "lvms_operator": "registry.redhat.io/lvms4/lvms-rhel9-operator@sha256:10c9ccab4f2857d113b55e12cac29aed0dc97d5a4e29ed2e4ea0f77551ee55f8",
