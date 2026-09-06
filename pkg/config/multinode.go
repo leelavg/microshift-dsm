@@ -1,7 +1,8 @@
 package config
 
 type MultiNodeConfig struct {
-	Enabled bool `json:"enabled"`
+	Enabled         bool   `json:"enabled"`
+	ControlNodeName string `json:"controlNodeName,omitempty"`
 }
 
 // ConfigMultiNode populates multinode configurations to Config.MultiNode

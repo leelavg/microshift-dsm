@@ -51,7 +51,9 @@ func (n *NetworkConfiguration) Dependencies() []string { return []string{} }
 
 func (n *NetworkConfiguration) configure(cfg *config.Config) {
 	n.kasAdvertiseAddresses = cfg.ApiServer.AdvertiseAddresses
-	n.skipInterfaceConfiguration = cfg.ApiServer.SkipInterface
+	// Worker nodes route the API VIP through the control node instead of
+	// claiming it locally; only the control node should bind the VIP.
+	n.skipInterfaceConfiguration = cfg.ApiServer.SkipInterface || cfg.MultiNode.ControlNodeName != ""
 }
 
 func (n *NetworkConfiguration) Run(ctx context.Context, ready chan<- struct{}, stopped chan<- struct{}) error {

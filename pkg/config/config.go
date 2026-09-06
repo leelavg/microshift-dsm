@@ -67,7 +67,7 @@ type Config struct {
 	// Internal-only fields
 	userSettings *Config `json:"-"` // the values read from the config file
 
-	MultiNode MultiNodeConfig `json:"-"` // the value read from commond line
+	MultiNode MultiNodeConfig `json:"multiNode"` // the value read from config file or command line
 
 	Warnings []string `json:"-"` // Warnings that should not prevent the service from starting.
 }
@@ -497,6 +497,13 @@ func (c *Config) incorporateUserSettings(u *Config) {
 	}
 	if u.C2CC.Routing.ServiceRouteTableID != nil {
 		c.C2CC.Routing.ServiceRouteTableID = u.C2CC.Routing.ServiceRouteTableID
+	}
+
+	if u.MultiNode.Enabled {
+		c.MultiNode.Enabled = u.MultiNode.Enabled
+	}
+	if u.MultiNode.ControlNodeName != "" {
+		c.MultiNode.ControlNodeName = u.MultiNode.ControlNodeName
 	}
 }
 

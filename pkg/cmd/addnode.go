@@ -41,6 +41,7 @@ type AddNodeOptions struct {
 	KubeconfigPath string
 	Timeout        time.Duration
 	Learner        bool
+	Worker         bool
 }
 
 func NewAddNodeCommand() *cobra.Command {
@@ -104,8 +105,16 @@ func runAddNode(ctx context.Context, opts *AddNodeOptions) error {
 		return nil
 	}
 
-	if err := cleanupMicroShiftData(cfg); err != nil {
-		return fmt.Errorf("failed to cleanup MicroShift data directories: %w", err)
+	// Only cleanup for etcd learner nodes; worker nodes keep kubelet config
+	if !opts.Worker {
+		if err := cleanupMicroShiftData(cfg); err != nil {
+			return fmt.Errorf("failed to cleanup MicroShift data directories: %w", err)
+		}
+	} else {
+		// For worker nodes, copy bootstrap kubeconfig to user's default location
+		if err := copyBootstrapToUserKubeconfig(cfg); err != nil {
+			klog.Warningf("failed to setup user kubeconfig for worker: %v", err)
+		}
 	}
 	klog.Info("MicroShift data directories cleaned up successfully")
 
@@ -121,28 +130,32 @@ func runAddNode(ctx context.Context, opts *AddNodeOptions) error {
 	}
 	klog.Info("Certificate authorities fetched and written successfully")
 
-	if err := generateEtcdCertificates(cfg); err != nil {
-		return fmt.Errorf("failed to generate etcd certificates: %w", err)
-	}
-	klog.Info("Etcd certificates generated successfully")
+	if !opts.Worker {
+		if err := generateEtcdCertificates(cfg); err != nil {
+			return fmt.Errorf("failed to generate etcd certificates: %w", err)
+		}
+		klog.Info("Etcd certificates generated successfully")
 
-	clusterMembers, err := getClusterNodes(ctx, client)
-	if err != nil {
-		return fmt.Errorf("failed to get cluster information: %w", err)
-	}
+		clusterMembers, err := getClusterNodes(ctx, client)
+		if err != nil {
+			return fmt.Errorf("failed to get cluster information: %w", err)
+		}
 
-	if err := configureEtcdForCluster(ctx, cfg, clusterMembers, opts.Learner); err != nil {
-		return fmt.Errorf("failed to configure etcd for cluster: %w", err)
+		if err := configureEtcdForCluster(ctx, cfg, clusterMembers, opts.Learner); err != nil {
+			return fmt.Errorf("failed to configure etcd for cluster: %w", err)
+		}
 	}
 
 	if err := configureBootstrapKubeconfig(cfg, opts.KubeconfigPath); err != nil {
 		return fmt.Errorf("failed to configure bootstrap kubeconfig: %w", err)
 	}
 
-	if err := restartMicroShift(); err != nil {
-		return fmt.Errorf("failed to restart MicroShift service: %w", err)
+	if !opts.Worker {
+		if err := restartMicroShift(); err != nil {
+			return fmt.Errorf("failed to restart MicroShift service: %w", err)
+		}
+		klog.Info("MicroShift service restarted")
 	}
-	klog.Info("MicroShift service restarted")
 
 	if err := waitForNodeReady(ctx, client, cfg.CanonicalNodeName()); err != nil {
 		return fmt.Errorf("node failed to become ready: %w", err)
@@ -506,6 +519,12 @@ func configureEtcdForCluster(ctx context.Context, cfg *config.Config, clusterMem
 
 func configureBootstrapKubeconfig(cfg *config.Config, kubeconfigPath string) error {
 	bootstrapKubeConfigPath := cfg.BootstrapKubeConfigPath()
+
+	// Skip if bootstrap kubeconfig already exists (e.g., mounted from control node)
+	if _, err := os.Stat(bootstrapKubeConfigPath); err == nil {
+		return nil
+	}
+
 	if err := os.MkdirAll(filepath.Dir(bootstrapKubeConfigPath), 0750); err != nil {
 		return fmt.Errorf("failed to create kubelet directory: %w", err)
 	}
@@ -583,5 +602,34 @@ func cleanupMicroShiftData(cfg *config.Config) error {
 			return fmt.Errorf("failed to remove directory %s: %w", dir, err)
 		}
 	}
+	return nil
+}
+
+func copyBootstrapToUserKubeconfig(cfg *config.Config) error {
+	bootstrapPath := cfg.BootstrapKubeConfigPath()
+	userKubeconfigDir := filepath.Join(os.Getenv("HOME"), ".kube")
+	userKubeconfigPath := filepath.Join(userKubeconfigDir, "config")
+
+	data, err := os.ReadFile(bootstrapPath)
+	if err != nil {
+		return fmt.Errorf("failed to read bootstrap kubeconfig: %w", err)
+	}
+
+	adminKubeconfigPath := filepath.Join(config.DataDir, "resources", "kubeadmin", "kubeconfig")
+	if err := os.MkdirAll(filepath.Dir(adminKubeconfigPath), 0700); err != nil {
+		return fmt.Errorf("failed to create kubeadmin directory: %w", err)
+	}
+	if err := os.WriteFile(adminKubeconfigPath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write kubeadmin kubeconfig: %w", err)
+	}
+
+	if err := os.MkdirAll(userKubeconfigDir, 0o700); err != nil {
+		return fmt.Errorf("failed to create .kube directory: %w", err)
+	}
+
+	if err := os.WriteFile(userKubeconfigPath, data, 0o600); err != nil {
+		return fmt.Errorf("failed to write user kubeconfig: %w", err)
+	}
+
 	return nil
 }

@@ -204,43 +204,58 @@ func RunMicroshift(cfg *config.Config) error {
 		return err
 	}
 
-	// TODO: change to only initialize what is strictly necessary for the selected role(s)
-	certChains, err := initCerts(cfg)
-	if err != nil {
-		klog.Fatalf("failed to retrieve the necessary certificates: %v", err)
-	}
-
-	// create kubeconfig for kube-scheduler, kubelet,controller-manager
-	if err := initKubeconfigs(cfg, certChains); err != nil {
-		klog.Fatalf("failed to create the necessary kubeconfigs for internal components: %v", err)
+	// Only init certs on control plane; workers use CAs fetched by addnode
+	var certChains *certchains.CertificateChains
+	if cfg.MultiNode.ControlNodeName == "" {
+		var err error
+		certChains, err = initCerts(cfg)
+		if err != nil {
+			klog.Fatalf("failed to retrieve the necessary certificates: %v", err)
+		}
+		// create kubeconfig for kube-scheduler, kubelet,controller-manager
+		if err := initKubeconfigs(cfg, certChains); err != nil {
+			klog.Fatalf("failed to create the necessary kubeconfigs for internal components: %v", err)
+		}
+	} else if err := initWorkerCerts(cfg); err != nil {
+		klog.Fatalf("failed to initialize worker certificates: %v", err)
 	}
 
 	// Establish the context we will use to control execution
 	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+
 	m := servicemanager.NewServiceManager(startRec)
 	util.Must(m.AddService(node.NewNetworkConfiguration(cfg)))
-	util.Must(m.AddService(controllers.NewEtcd(cfg)))
-	util.Must(m.AddService(sysconfwatch.NewSysConfWatchController(cfg)))
-	util.Must(m.AddService(controllers.NewKubeAPIServer(cfg)))
-	util.Must(m.AddService(controllers.NewKubeScheduler(cfg)))
-	util.Must(m.AddService(controllers.NewKubeControllerManager(runCtx, cfg)))
-	util.Must(m.AddService(controllers.NewOpenShiftCRDManager(cfg)))
-	util.Must(m.AddService(controllers.NewRouteControllerManager(cfg)))
-	util.Must(m.AddService(controllers.NewOpenShiftDefaultSCCManager(cfg)))
-	util.Must(m.AddService(mdns.NewMicroShiftmDNSController(cfg)))
-	util.Must(m.AddService(controllers.NewClusterPolicyController(cfg)))
-	util.Must(m.AddService(controllers.NewInfrastructureServices(cfg)))
-	util.Must(m.AddService(controllers.NewVersionManager(cfg)))
-	util.Must(m.AddService(controllers.NewKubeletCAManager(cfg)))
+
+	// Only start control-plane components if not a worker-only node
+	if cfg.MultiNode.ControlNodeName == "" {
+		util.Must(m.AddService(controllers.NewEtcd(cfg)))
+		util.Must(m.AddService(sysconfwatch.NewSysConfWatchController(cfg)))
+		util.Must(m.AddService(controllers.NewKubeAPIServer(cfg)))
+		util.Must(m.AddService(controllers.NewKubeScheduler(cfg)))
+		util.Must(m.AddService(controllers.NewKubeControllerManager(runCtx, cfg)))
+		util.Must(m.AddService(controllers.NewOpenShiftCRDManager(cfg)))
+		util.Must(m.AddService(controllers.NewRouteControllerManager(cfg)))
+		util.Must(m.AddService(controllers.NewOpenShiftDefaultSCCManager(cfg)))
+		util.Must(m.AddService(mdns.NewMicroShiftmDNSController(cfg)))
+		util.Must(m.AddService(controllers.NewClusterPolicyController(cfg)))
+		util.Must(m.AddService(controllers.NewInfrastructureServices(cfg)))
+		util.Must(m.AddService(controllers.NewVersionManager(cfg)))
+		util.Must(m.AddService(controllers.NewKubeletCAManager(cfg)))
+		util.Must(m.AddService(loadbalancerservice.NewLoadbalancerServiceController(cfg)))
+	}
+
 	util.Must(m.AddService(node.NewKubeletServer(cfg)))
-	util.Must(m.AddService(loadbalancerservice.NewLoadbalancerServiceController(cfg)))
-	util.Must(m.AddService(controllers.NewKubeStorageVersionMigrator(cfg)))
-	util.Must(m.AddService(controllers.NewClusterID(cfg)))
-	util.Must(m.AddService(controllers.NewTelemetryManager(cfg)))
-	util.Must(m.AddService(controllers.NewHostsWatcherManager(cfg)))
-	util.Must(m.AddService(controllers.NewDNSConfigurationWatcherManager(cfg)))
-	util.Must(m.AddService(gdp.NewGenericDevicePlugin(cfg)))
-	util.Must(m.AddService(c2cc.NewC2CCRouteManager(cfg)))
+
+	if cfg.MultiNode.ControlNodeName == "" {
+		util.Must(m.AddService(controllers.NewKubeStorageVersionMigrator(cfg)))
+		util.Must(m.AddService(controllers.NewClusterID(cfg)))
+		util.Must(m.AddService(controllers.NewTelemetryManager(cfg)))
+		util.Must(m.AddService(controllers.NewHostsWatcherManager(cfg)))
+		util.Must(m.AddService(controllers.NewDNSConfigurationWatcherManager(cfg)))
+		util.Must(m.AddService(gdp.NewGenericDevicePlugin(cfg)))
+		util.Must(m.AddService(c2cc.NewC2CCRouteManager(cfg)))
+	}
 
 	// Storing and clearing the env, so other components don't send the READY=1 until MicroShift is fully ready
 	notifySocket := os.Getenv("NOTIFY_SOCKET")
@@ -248,13 +263,20 @@ func RunMicroshift(cfg *config.Config) error {
 
 	startRec.ServicesStart(microshiftStart)
 
-	_, rotationDate, err := certchains.WhenToRotateAtEarliest(certChains)
-	if err != nil {
-		klog.Fatalf("failed to determine when to rotate certificates: %v", err)
+	// Only check cert rotation on control plane
+	var certCtx context.Context
+	var certCancel context.CancelFunc
+	if cfg.MultiNode.ControlNodeName == "" {
+		_, rotationDate, err := certchains.WhenToRotateAtEarliest(certChains)
+		if err != nil {
+			klog.Fatalf("failed to determine when to rotate certificates: %v", err)
+		}
+		// Establish a deadline for restarting to rotate the certificates.
+		certCtx, certCancel = context.WithDeadline(context.Background(), rotationDate)
+	} else {
+		// Worker: no cert rotation, use background context
+		certCtx, certCancel = context.WithCancel(context.Background())
 	}
-
-	// Establish a deadline for restarting to rotate the certificates.
-	certCtx, certCancel := context.WithDeadline(context.Background(), rotationDate)
 
 	// Watch for the certificate deadline context to be done, log a
 	// message, and cancel the run context to propagate the shutdown.
@@ -302,7 +324,26 @@ func RunMicroshift(cfg *config.Config) error {
 		}
 
 		// After MicroShift's core becomes ready, run the kustomizer (delete and/or apply manifests).
-		kustomize.NewKustomizer(cfg).RunStandalone(runCtx)
+		// Skip manifest deployment on worker-only nodes.
+		if cfg.MultiNode.ControlNodeName == "" {
+			kustomize.NewKustomizer(cfg).RunStandalone(runCtx)
+		}
+
+		// If joining cluster as worker, run add-node logic after services are ready
+		if cfg.MultiNode.ControlNodeName != "" {
+			go func() {
+				klog.Info("Running add-node to join cluster as worker node")
+				opts := &AddNodeOptions{
+					KubeconfigPath: cfg.BootstrapKubeConfigPath(),
+					Timeout:        10 * time.Minute,
+					Learner:        false,
+					Worker:         true,
+				}
+				if err := runAddNode(runCtx, opts); err != nil {
+					klog.Errorf("failed to join cluster as worker: %v", err)
+				}
+			}()
+		}
 
 		// Provision certs for optional components after kustomize creates their namespaces.
 		// Runs concurrently because it polls for the namespace created by kustomize.
