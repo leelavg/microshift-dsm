@@ -6,7 +6,10 @@
 # ensure MicroShift is upgraded before running validation tests
 export TEST_RANDOMIZATION=none
 
-start_image="rhel96-bootc-brew-y2-with-optional"
+# Add extra timeout because it runs both standard1 and standard2 suites.
+export TEST_EXECUTION_TIMEOUT=60m
+
+start_image="rhel96-bootc-brew-y1-with-optional"
 dest_image="rhel98-bootc-brew-lrel-optional"
 
 scenario_create_vms() {
@@ -58,7 +61,9 @@ scenario_run_tests() {
     echo "INFO: Cleaning up LVMS workloads..."
     run_command_on_vm host1 'bash -s' < "${TESTDIR}/../scripts/lvms-helpers/cleanupWorkload.sh"
 
-    # Run standard2 suite for basic validation after upgrade
+    # Run standard1 and standard2 suites for basic validation after upgrade
     run_tests host1 \
+        --variable "EXPECTED_OS_VERSION:9.8" \
+        suites/standard1/ \
         suites/standard2/
 }
