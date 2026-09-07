@@ -20,5 +20,8 @@ scenario_remove_vms() {
 scenario_run_tests() {
     exit_if_image_not_found "${start_image}"
 
-    run_tests host1 suites/standard2/
+    run_tests host1 \
+        --variable "EXPECTED_OS_VERSION:10.2" \
+        suites/standard1/ \
+        suites/standard2/
 }
