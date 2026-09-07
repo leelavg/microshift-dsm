@@ -10,9 +10,6 @@
 
 export TEST_RANDOMIZATION=none
 
-# Add extra timeout because it runs both standard1 and standard2 suites.
-export TEST_EXECUTION_TIMEOUT=60m
-
 # Redefine network-related settings to use the dedicated IPv6 network bridge
 # shellcheck disable=SC2034  # used elsewhere
 VM_BRIDGE_IP="$(get_vm_bridge_ip "${VM_IPV6_NETWORK}")"
@@ -98,15 +95,13 @@ EOF"
     echo "INFO: Cleaning up LVMS workloads..."
     run_command_on_vm host1 'bash -s' < "${TESTDIR}/../scripts/lvms-helpers/cleanupWorkload.sh"
 
+    # Exclude default-config which conflicts with the TLS drop-in config applied above.
     echo "INFO: Running validation tests for multi-config scenario..."
     run_tests host1 \
         --variable "EXPECTED_OS_VERSION:9.8" \
         --exclude version \
-        suites/standard1/
-
-    # Run all standard2 tests except default-config (which conflicts with TLS drop-in config)
-    run_tests host1 \
         --exclude default-config \
+        suites/standard1/ \
         suites/standard2/
 
     echo "SUCCESS: Multi-config scenario validation completed - no conflicts detected"
