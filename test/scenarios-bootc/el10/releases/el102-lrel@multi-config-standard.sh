@@ -10,6 +10,9 @@
 
 export TEST_RANDOMIZATION=none
 
+# Add extra timeout because it runs both standard1 and standard2 suites.
+export TEST_EXECUTION_TIMEOUT=60m
+
 # Redefine network-related settings to use the dedicated IPv6 network bridge
 # shellcheck disable=SC2034  # used elsewhere
 VM_BRIDGE_IP="$(get_vm_bridge_ip "${VM_IPV6_NETWORK}")"
@@ -77,7 +80,7 @@ EOF"
     # Wait for MicroShift to be ready
     wait_for_microshift_to_be_ready host1
 
-    # Setup oc client and kubeconfig for gingko tests
+    # Setup oc client and kubeconfig for scripts that need it
     setup_oc_and_kubeconfig host1
 
     # Create LVMS workloads
@@ -87,16 +90,21 @@ EOF"
     echo "INFO: Checking LVMS resources..."
     run_command_on_vm host1 'bash -s' < "${TESTDIR}/../scripts/lvms-helpers/checkLvmsResources.sh"
 
-    # Validate LVMS still works after all tests
-    echo "INFO: Validating LVMS workloads after tests..."
+    # Validate LVMS workloads before running tests
+    echo "INFO: Validating LVMS workloads..."
     run_command_on_vm host1 'bash -s' < "${TESTDIR}/../scripts/lvms-helpers/checkWorkloadExists.sh"
 
-    # Cleanup LVMS workloads
+    # Cleanup LVMS workloads before running tests that may restart MicroShift
     echo "INFO: Cleaning up LVMS workloads..."
     run_command_on_vm host1 'bash -s' < "${TESTDIR}/../scripts/lvms-helpers/cleanupWorkload.sh"
 
-    # Run all standard2 tests except default-config (which conflicts with TLS drop-in config)
     echo "INFO: Running validation tests for multi-config scenario..."
+    run_tests host1 \
+        --variable "EXPECTED_OS_VERSION:10.2" \
+        --exclude version \
+        suites/standard1/
+
+    # Run all standard2 tests except default-config (which conflicts with TLS drop-in config)
     run_tests host1 \
         --exclude default-config \
         suites/standard2/

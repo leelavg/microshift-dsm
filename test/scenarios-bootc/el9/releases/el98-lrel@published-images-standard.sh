@@ -2,18 +2,21 @@
 
 # Sourced from scenario.sh and uses functions defined there.
 
+# Add extra timeout because it runs both standard1 and standard2 suites.
+export TEST_EXECUTION_TIMEOUT=60m
+
 # Enable container signature verification for published MicroShift images.
 # These are ec / rc / zstream, thus guaranteed to be signed.
 # shellcheck disable=SC2034  # used elsewhere
 IMAGE_SIGSTORE_ENABLED=true
 
-LATEST_RELEASE_IMAGE_URL="$(get_lrel_release_image_url "${BREW_LREL_RELEASE_VERSION}" 10)"
+LATEST_RELEASE_IMAGE_URL="$(get_lrel_release_image_url "${BREW_LREL_RELEASE_VERSION}")"
 
 scenario_create_vms() {
     exit_if_image_not_set "${LATEST_RELEASE_IMAGE_URL}"
 
     prepare_kickstart host1 kickstart-bootc.ks.template "${LATEST_RELEASE_IMAGE_URL}"
-    launch_vm rhel102-bootc
+    launch_vm rhel98-bootc
 
     # Open the firewall ports. Other scenarios get this behavior by embedding
     # settings in the blueprint, but we cannot open firewall ports in published
@@ -32,7 +35,8 @@ scenario_run_tests() {
     exit_if_image_not_set "${LATEST_RELEASE_IMAGE_URL}"
 
     run_tests host1 \
-        --variable "EXPECTED_OS_VERSION:10.2" \
+        --variable "EXPECTED_OS_VERSION:9.8" \
         --variable "IMAGE_SIGSTORE_ENABLED:True" \
-        suites/standard1/
+        suites/standard1/ \
+        suites/standard2/
 }

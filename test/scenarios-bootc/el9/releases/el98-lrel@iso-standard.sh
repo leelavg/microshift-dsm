@@ -2,6 +2,9 @@
 
 # Sourced from scenario.sh and uses functions defined there.
 
+# Add extra timeout because it runs both standard1 and standard2 suites.
+export TEST_EXECUTION_TIMEOUT=60m
+
 start_image="rhel98-bootc-brew-lrel-optional"
 
 scenario_create_vms() {
@@ -20,5 +23,8 @@ scenario_remove_vms() {
 scenario_run_tests() {
     exit_if_image_not_found "${start_image}"
 
-    run_tests host1 suites/standard2/
+    run_tests host1 \
+        --variable "EXPECTED_OS_VERSION:9.8" \
+        suites/standard1/ \
+        suites/standard2/
 }
