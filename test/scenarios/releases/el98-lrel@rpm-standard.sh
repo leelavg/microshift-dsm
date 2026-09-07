@@ -59,5 +59,6 @@ scenario_run_tests() {
         --variable "EXPECTED_OS_VERSION:9.8" \
         suites/rpm/install.robot \
         suites/standard1/ \
+        suites/standard2/ \
         suites/rpm/remove.robot
 }
