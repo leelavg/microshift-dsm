@@ -2,9 +2,6 @@
 
 # Sourced from scenario.sh and uses functions defined there.
 
-# Add extra timeout because it runs both standard1 and standard2 suites.
-export TEST_EXECUTION_TIMEOUT=60m
-
 # Enable container signature verification for published MicroShift images.
 # These are ec / rc / zstream, thus guaranteed to be signed.
 # shellcheck disable=SC2034  # used elsewhere

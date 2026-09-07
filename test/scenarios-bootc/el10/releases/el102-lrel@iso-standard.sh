@@ -2,9 +2,6 @@
 
 # Sourced from scenario.sh and uses functions defined there.
 
-# Add extra timeout because it runs both standard1 and standard2 suites.
-export TEST_EXECUTION_TIMEOUT=60m
-
 start_image="rhel102-bootc-brew-lrel-optional"
 
 scenario_create_vms() {
