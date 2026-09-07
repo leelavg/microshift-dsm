@@ -57,8 +57,9 @@ scenario_run_tests() {
     echo "INFO: Cleaning up LVMS workloads..."
     run_command_on_vm host1 'bash -s' < "${TESTDIR}/../scripts/lvms-helpers/cleanupWorkload.sh"
 
-    # Run standard1 suite for basic validation after upgrade
+    # Run standard1 and standard2 suites for basic validation after upgrade
     run_tests host1 \
         --variable "EXPECTED_OS_VERSION:9.8" \
-        suites/standard1/
+        suites/standard1/ \
+        suites/standard2/
 }
