@@ -6,6 +6,7 @@
     "cli": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:801760e810355f7f270fec2af65c5f654b88a13560a8fb26caedc92a05e8908a",
     "coredns": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:e592be37a5f980328db4e6bf6ee6be64f10e666c02ce2e2b848112cdc579ef22",
     "haproxy-router": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:122605dd5258e3ec4863f589c882ba5e7ea4255b805af4dbd0d1bb914beefa89",
+    "haproxy-router-haproxy32": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:1d5f4e9e0dd0f9071e3f0dd97d7929a911bdea9bc7a2fedb1ae93fd0cb2fcdb9",
     "kube-rbac-proxy": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:7b647080c134c6db71dfd7a5fe850256f97b50bdd722a9d65f75b56178ba7c61",
     "ovn-kubernetes-microshift": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:8cee4dfb73766adbf871d2858b7a018a5e87c6ae62df1d7641fcf82e57c20bae",
     "pod": "quay.io/openshift-release-dev/ocp-v5.0-art-dev@sha256:e192222337d4df1fa170dd50fc434f1cfd2762cc7d56691a48142d70cf67b3a5",
