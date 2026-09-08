@@ -6,7 +6,10 @@
 # ensure MicroShift is upgraded before running validation tests
 export TEST_RANDOMIZATION=none
 
-start_image="rhel96-bootc-brew-y2-with-optional"
+# Add extra timeout because it runs both standard1 and standard2 suites.
+export TEST_EXECUTION_TIMEOUT=60m
+
+start_image="rhel98-bootc-brew-y2-with-optional"
 dest_image="rhel102-bootc-brew-lrel-optional"
 
 scenario_create_vms() {
@@ -14,7 +17,7 @@ scenario_create_vms() {
     exit_if_image_not_found "${dest_image}"
 
     prepare_kickstart host1 kickstart-bootc.ks.template "${start_image}"
-    launch_vm rhel96-bootc --vm_vcpus 4
+    launch_vm rhel98-bootc --vm_vcpus 4
 }
 
 scenario_remove_vms() {
